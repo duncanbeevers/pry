@@ -98,6 +98,11 @@ class Pry
                 end,
                ]
 
+  # The default handler for Object#pry, just start pry with the receiver as target
+  DEFAULT_OBJECT_PRY_HANDLER = proc do |target|
+    Pry.start(target)
+  end
+
   # Deal with the ^D key being pressed, different behaviour in
   # different cases:
   # 1) In an expression     - behave like `!` command   (clear input buffer)

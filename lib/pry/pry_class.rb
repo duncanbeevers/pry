@@ -257,9 +257,11 @@ class Pry
       config.history.should_load = false
     end
 
+    config.object_pry_handler = DEFAULT_OBJECT_PRY_HANDLER
     config.control_d_handler = DEFAULT_CONTROL_D_HANDLER
 
     config.memory_size = 100
+
 
     config.ls ||= OpenStruct.new({
       :heading_color            => :default,

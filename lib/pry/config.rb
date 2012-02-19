@@ -139,6 +139,10 @@ class Pry
     # @return [Integer] Amount of results that will be stored into out
     attr_accessor :memory_size
 
+    # @ return [Proc] The proc that manages the behavior of Object#pry
+    #   The proc is passed 
+    attr_accessor :object_pry_handler
+
     # @return [Proc] The proc that manages ^D presses in the REPL.
     #   The proc is passed the current eval_string and the current pry instance.
     attr_accessor :control_d_handler

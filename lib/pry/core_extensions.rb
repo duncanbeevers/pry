@@ -17,7 +17,7 @@ class Object
   # @example Start a Pry session on current self (whatever that is)
   #   pry
   def pry(target=self)
-    Pry.start(target)
+    Pry.config.object_pry_handler.call(target)
   end
 
   # Return a binding object for the receiver.
