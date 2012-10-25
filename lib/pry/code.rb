@@ -27,26 +27,30 @@ class Pry
   # object.
   class Code
     class << self
+      include MethodSource::CodeHelpers
+
       # Instantiate a `Code` object containing code loaded from a file or
       # Pry's line buffer.
       #
       # @param [String] fn The name of a file, or "(pry)".
-      # @param [Symbol] code_type (:ruby) The type of code the file contains.
+      # @param [Symbol] code_type The type of code the file contains.
       # @return [Code]
-      def from_file(fn, code_type=nil)
+      def from_file(fn, code_type=type_from_filename(fn))
         if fn == Pry.eval_path
-          f = Pry.line_buffer.drop(1)
+          new(Pry.line_buffer.drop(1), 1, code_type)
         else
-          if File.readable?(fn)
-            f = File.open(fn, 'r')
-            code_type = type_from_filename(fn)
-          else
-            raise CommandError, "Cannot open #{fn.inspect} for reading."
+          abs_path = [File.expand_path(fn, Dir.pwd),
+                      File.expand_path(fn, Pry::INITIAL_PWD)
+                     ].detect{ |abs_path| File.readable?(abs_path) }
+
+          unless abs_path
+            raise MethodSource::SourceNotFoundError, "Cannot open #{fn.inspect} for reading."
+          end
+
+          File.open(abs_path, 'r') do |f|
+            new(f, 1, code_type)
           end
         end
-        new(f, 1, code_type || :ruby)
-      ensure
-        f.close if f.respond_to?(:close)
       end
 
       # Instantiate a `Code` object containing code extracted from a
@@ -54,8 +58,8 @@ class Pry
       #
       # @param [::Method, UnboundMethod, Proc, Pry::Method] meth The method
       #   object.
-      # @param [Fixnum, nil] The line number to start on, or nil to use the
-      #   method's original line numbers.
+      # @param [Fixnum, nil] start_line The line number to start on, or nil to
+      #   use the method's original line numbers.
       # @return [Code]
       def from_method(meth, start_line=nil)
         meth = Pry::Method(meth)
@@ -63,13 +67,29 @@ class Pry
         new(meth.source, start_line, meth.source_type)
       end
 
+      # Attempt to extract the source code for module (or class) `mod`.
+      #
+      # @param [Module, Class] mod The module (or class) of interest.
+      # @param [Fixnum, nil] start_line The line number to start on, or nil to use the
+      #   method's original line numbers.
+      # @param [Fixnum] candidate_rank The module candidate (by rank)
+      #   to use (see `Pry::WrappedModule::Candidate` for more information).
+      # @return [Code]
+      def from_module(mod, start_line=nil, candidate_rank=0)
+        candidate = Pry::WrappedModule(mod).candidate(candidate_rank)
+
+        start_line ||= candidate.line
+        new(candidate.source, start_line, :ruby)
+      end
+
       protected
         # Guess the CodeRay type of a file from its extension, or nil if
         # unknown.
         #
         # @param [String] filename
+        # @param [Symbol] default (:ruby) the file type to assume if none could be detected
         # @return [Symbol, nil]
-        def type_from_filename(filename)
+        def type_from_filename(filename, default=:ruby)
           map = {
             %w(.c .h) => :c,
             %w(.cpp .hpp .cc .h cxx) => :cpp,
@@ -91,10 +111,11 @@ class Pry
             k.any? { |ext| ext == File.extname(filename) }
           end
 
-          type
+          type || default
         end
     end
 
+    # @return [Symbol] The type of code stored in this wrapper.
     attr_accessor :code_type
 
     # Instantiate a `Code` object containing code from the given `Array`,
@@ -103,8 +124,8 @@ class Pry
     # empty `Code` object and then use `#push` to insert the lines.
     #
     # @param [Array<String>, String, IO] lines
-    # @param [Fixnum?] (1) start_line
-    # @param [Symbol?] (:ruby) code_type
+    # @param [Fixnum?] start_line
+    # @param [Symbol?] code_type
     def initialize(lines=[], start_line=1, code_type=:ruby)
       if lines.is_a? String
         lines = lines.lines
@@ -173,10 +194,27 @@ class Pry
       end
     end
 
+    # Take `num_lines` from `start_line`, forward or backwards
+    #
+    # @param [Fixnum] start_line
+    # @param [Fixnum] num_lines
+    # @return [Code]
+    def take_lines(start_line, num_lines)
+      if start_line >= 0
+        start_idx = @lines.index { |l| l.last >= start_line } || @lines.length
+      else
+        start_idx = @lines.length + start_line
+      end
+
+      alter do
+        @lines = @lines.slice(start_idx, num_lines)
+      end
+    end
+
     # Remove all lines except for the `lines` up to and excluding `line_num`.
     #
     # @param [Fixnum] line_num
-    # @param [Fixnum] (1) lines
+    # @param [Fixnum] lines
     # @return [Code]
     def before(line_num, lines=1)
       return self unless line_num
@@ -190,7 +228,7 @@ class Pry
     # `line_num`.
     #
     # @param [Fixnum] line_num
-    # @param [Fixnum] (1) lines
+    # @param [Fixnum] lines
     # @return [Code]
     def around(line_num, lines=1)
       return self unless line_num
@@ -203,7 +241,7 @@ class Pry
     # Remove all lines except for the `lines` after and excluding `line_num`.
     #
     # @param [Fixnum] line_num
-    # @param [Fixnum] (1) lines
+    # @param [Fixnum] lines
     # @return [Code]
     def after(line_num, lines=1)
       return self unless line_num
@@ -228,7 +266,7 @@ class Pry
 
     # Format output with line numbers next to it, unless `y_n` is falsy.
     #
-    # @param [Boolean?] (true) y_n
+    # @param [Boolean?] y_n
     # @return [Code]
     def with_line_numbers(y_n=true)
       alter do
@@ -239,7 +277,7 @@ class Pry
     # Format output with a marker next to the given `line_num`, unless `line_num`
     # is falsy.
     #
-    # @param [Fixnum?] (1) line_num
+    # @param [Fixnum?] line_num
     # @return [Code]
     def with_marker(line_num=1)
       alter do
@@ -251,7 +289,7 @@ class Pry
     # Format output with the specified number of spaces in front of every line,
     # unless `spaces` is falsy.
     #
-    # @param [Fixnum?] (0) spaces
+    # @param [Fixnum?] spaces
     # @return [Code]
     def with_indentation(spaces=0)
       alter do
@@ -282,7 +320,7 @@ class Pry
         max_width = lines.last.last.to_s.length if lines.length > 0
         lines.each do |l|
           padded_line_num = l[1].to_s.rjust(max_width)
-          l[0] = "#{Pry::Helpers::Text.blue(padded_line_num)}: #{l[0]}"
+          l[0] = "#{Pry::Helpers::BaseHelpers.colorize_code(padded_line_num.to_s)}: #{l[0]}"
         end
       end
 
@@ -305,11 +343,36 @@ class Pry
       lines.map { |l| "#{l.first}\n" }.join
     end
 
+    # Get the comment that describes the expression on the given line number.
+    #
+    # @param [Fixnum]  line_number (1-based)
+    # @return [String]  the code.
+    def comment_describing(line_number)
+      self.class.comment_describing(raw, line_number)
+    end
+
+    # Get the multiline expression that starts on the given line number.
+    #
+    # @param [Fixnum]  line_number (1-based)
+    # @return [String]  the code.
+    def expression_at(line_number, consume=0)
+      self.class.expression_at(raw, line_number, :consume => consume)
+    end
+
+    # Get the (approximate) Module.nesting at the give line number.
+    #
+    # @param [Fixnum]  line_number  line number starting from 1
+    # @param [Module] top_module   the module in which this code exists
+    # @return [Array<Module>]  a list of open modules.
+    def nesting_at(line_number, top_module=Object)
+      Pry::Indent.nesting_at(raw, line_number)
+    end
+
     # Return an unformatted String of the code.
     #
     # @return [String]
     def raw
-      @lines.map(&:first).join("\n")
+      @lines.map(&:first).join("\n") + "\n"
     end
 
     # Return the number of lines stored.

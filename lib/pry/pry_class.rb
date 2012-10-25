@@ -5,7 +5,8 @@ require 'pry/config'
 class Pry
 
   # The RC Files to load.
-  RC_FILES = ["~/.pryrc", "./.pryrc"]
+  HOME_RC_FILE = "~/.pryrc"
+  LOCAL_RC_FILE = "./.pryrc"
 
   # class accessors
   class << self
@@ -43,26 +44,41 @@ class Pry
     # @return [Boolean] Whether Pry was activated from the command line.
     attr_accessor :cli
 
-    # @return [Fixnum] The number of active Pry sessions.
-    attr_accessor :active_sessions
+    # @return [Boolean] Whether Pry sessions are quiet by default.
+    attr_accessor :quiet
+
+    # @return [Binding] A top level binding with no local variables
+    attr_accessor :toplevel_binding
 
     # plugin forwardables
     def_delegators :@plugin_manager, :plugins, :load_plugins, :locate_plugins
 
     delegate_accessors :@config, :input, :output, :commands, :prompt, :print, :exception_handler,
-      :hooks, :color, :pager, :editor, :memory_size, :input_stack
+      :hooks, :color, :pager, :editor, :memory_size, :input_stack, :extra_sticky_locals
+  end
+
+
+  # Load the given file in the context of `Pry.toplevel_binding`
+  # @param [String] file_name The unexpanded file path.
+  def self.load_file_at_toplevel(file_name)
+    full_name = File.expand_path(file_name)
+    begin
+      toplevel_binding.eval(File.read(full_name), full_name) if File.exists?(full_name)
+    rescue RescuableException => e
+      puts "Error loading #{file_name}: #{e}"
+    end
   end
 
   # Load the rc files given in the `Pry::RC_FILES` array.
   # This method can also be used to reload the files if they have changed.
   def self.load_rc
-    files = RC_FILES.collect { |file_name| File.expand_path(file_name) }.uniq
-    files.each do |file_name|
-      begin
-        load(file_name) if File.exists?(file_name)
-      rescue RescuableException => e
-        puts "Error loading #{file_name}: #{e}"
-      end
+    load_file_at_toplevel(HOME_RC_FILE)
+  end
+
+  # Load the local RC file (./.pryrc)
+  def self.load_local_rc
+    unless File.expand_path(HOME_RC_FILE) == File.expand_path(LOCAL_RC_FILE)
+      load_file_at_toplevel(LOCAL_RC_FILE)
     end
   end
 
@@ -89,6 +105,7 @@ class Pry
     # note these have to be loaded here rather than in pry_instance as
     # we only want them loaded once per entire Pry lifetime.
     load_rc if Pry.config.should_load_rc
+    load_local_rc if Pry.config.should_load_local_rc
     load_plugins if Pry.config.should_load_plugins
     load_requires if Pry.config.should_load_requires
     load_history if Pry.config.history.should_load
@@ -98,14 +115,14 @@ class Pry
   end
 
   # Start a Pry REPL.
-  # This method also loads the files specified in `Pry::RC_FILES` the
+  # This method also loads the ~/.pryrc and ./.pryrc as necessary
   # first time it is invoked.
   # @param [Object, Binding] target The receiver of the Pry session
   # @param [Hash] options
   # @option options (see Pry#initialize)
   # @example
   #   Pry.start(Object.new, :input => MyInput.new)
-  def self.start(target=TOPLEVEL_BINDING, options={})
+  def self.start(target=toplevel_binding, options={})
     target = Pry.binding_for(target)
     initial_session_setup
 
@@ -119,12 +136,7 @@ class Pry
     pry_instance.backtrace.shift if pry_instance.backtrace.first =~ /pry.*core_extensions.*pry/
 
     # yield the binding_stack to the hook for modification
-    pry_instance.exec_hook(
-                           :when_started,
-                           target,
-                           options,
-                           pry_instance
-                           )
+    pry_instance.exec_hook(:when_started, target, options, pry_instance)
 
     if !pry_instance.binding_stack.empty?
       head = pry_instance.binding_stack.pop
@@ -132,8 +144,21 @@ class Pry
       head = target
     end
 
+    # Clear the line before starting Pry. This fixes the issue discussed here:
+    # https://github.com/pry/pry/issues/566
+    if Pry.config.auto_indent
+      Kernel.print Pry::Helpers::BaseHelpers.windows_ansi? ? "\e[0F" : "\e[0G"
+    end
+
     # Enter the matrix
     pry_instance.repl(head)
+  end
+
+  # Execute the file through the REPL loop, non-interactively.
+  # @param [String] file_name File name to load through the REPL.
+  def self.load_file_through_repl(file_name)
+    require "pry/repl_file_loader"
+    REPLFileLoader.new(file_name).load
   end
 
   # An inspector that clips the output to `max_length` chars.
@@ -175,7 +200,7 @@ class Pry
 
   # Run a Pry command from outside a session. The commands available are
   # those referenced by `Pry.commands` (the default command set).
-  # @param [String] arg_string The Pry command (including arguments,
+  # @param [String] command_string The Pry command (including arguments,
   #   if any).
   # @param [Hash] options Optional named parameters.
   # @return [Object] The return value of the Pry command.
@@ -219,6 +244,7 @@ class Pry
     config.input = Readline
     config.output = $stdout
     config.commands = Pry::Commands
+    config.prompt_name = DEFAULT_PROMPT_NAME
     config.prompt = DEFAULT_PROMPT
     config.print = DEFAULT_PRINT
     config.exception_handler = DEFAULT_EXCEPTION_HANDLER
@@ -231,12 +257,19 @@ class Pry
     config.system = DEFAULT_SYSTEM
     config.editor = default_editor_for_platform
     config.should_load_rc = true
+    config.should_load_local_rc = true
     config.should_trap_interrupts = Helpers::BaseHelpers.jruby?
     config.disable_auto_reload = false
     config.command_prefix = ""
-    config.auto_indent = true
+    config.auto_indent = Helpers::BaseHelpers.use_ansi_codes?
     config.correct_indent = true
     config.collision_warning = false
+
+    if defined?(Bond) && Readline::VERSION !~ /editline/i
+      config.completer = Pry::BondCompleter
+    else
+      config.completer = Pry::InputCompleter
+    end
 
     config.gist ||= OpenStruct.new
     config.gist.inspecter = proc(&:pretty_inspect)
@@ -262,6 +295,7 @@ class Pry
 
     config.memory_size = 100
 
+    config.extra_sticky_locals = {}
 
     config.ls ||= OpenStruct.new({
       :heading_color            => :default,
@@ -281,9 +315,10 @@ class Pry
       :builtin_global_color     => :cyan,        # e.g. $stdin, $-w, $PID
       :pseudo_global_color      => :cyan,        # e.g. $~, $1..$9, $LAST_MATCH_INFO
 
-      :constant_color           => :default,       # e.g. VERSION, ARGF
+      :constant_color           => :default,     # e.g. VERSION, ARGF
       :class_constant_color     => :blue,        # e.g. Object, Kernel
       :exception_constant_color => :magenta,     # e.g. Exception, RuntimeError
+      :unloaded_constant_color  => :yellow,      # Any constant that is still in .autoload? state
 
       # What should separate items listed by ls? (TODO: we should allow a columnar layout)
       :separator                => "  ",
@@ -308,7 +343,6 @@ class Pry
     self.current_line = 1
     self.line_buffer = [""]
     self.eval_path = "(pry)"
-    self.active_sessions = 0
 
     fix_coderay_colors
   end
@@ -324,7 +358,7 @@ class Pry
                  begin
                    require 'coderay/encoders/term'
                    CodeRay::Encoders::Term::TOKEN_COLORS
-                 rescue => e
+                 rescue
                  end
                end
 
@@ -347,7 +381,7 @@ class Pry
   # @param [Object] target The object to get a `Binding` object for.
   # @return [Binding] The `Binding` object.
   def self.binding_for(target)
-    if target.is_a?(Binding)
+    if Binding === target
       target
     else
       if TOPLEVEL_BINDING.eval('self') == target
@@ -356,6 +390,23 @@ class Pry
         target.__binding__
       end
     end
+  end
+
+  def self.toplevel_binding
+    unless @toplevel_binding
+      # Grab a copy of the TOPLEVEL_BINDING without any local variables.
+      # This binding has a default definee of Object, and new methods are
+      # private (just as in TOPLEVEL_BINDING).
+      TOPLEVEL_BINDING.eval <<-RUBY
+        def self.__pry__
+          binding
+        end
+        Pry.toplevel_binding = __pry__
+        class << self; undef __pry__; end
+      RUBY
+    end
+    @toplevel_binding.eval('private')
+    @toplevel_binding
   end
 end
 

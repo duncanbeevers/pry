@@ -2,7 +2,10 @@ require 'helper'
 
 describe Pry::CommandSet do
   before do
-    @set = Pry::CommandSet.new
+    @set = Pry::CommandSet.new do
+      import Pry::Commands
+    end
+
     @ctx = {
       :target => binding,
       :command_set => @set
@@ -80,6 +83,28 @@ describe Pry::CommandSet do
     }.should.raise(Pry::NoCommandError)
   end
 
+  it 'should return command set after import' do
+    run = false
+
+    other_set = Pry::CommandSet.new do
+      command('foo') { run = true }
+      command('bar') {}
+    end
+
+    @set.import(other_set).should == @set
+  end
+
+  it 'should return command set after import_from' do
+    run = false
+
+    other_set = Pry::CommandSet.new do
+      command('foo') { run = true }
+      command('bar') {}
+    end
+
+    @set.import_from(other_set, 'foo').should == @set
+  end
+
   it 'should be able to import some commands from other sets using listing name' do
     run = false
 
@@ -121,28 +146,71 @@ describe Pry::CommandSet do
     @set.commands['foo'].description.should == 'some stuff'
   end
 
-  it 'should be able to alias method' do
-    run = false
-    @set.command('foo', 'stuff') { run = true }
+  describe "aliases" do
+    it 'should be able to alias command' do
+      run = false
+      @set.command('foo', 'stuff') { run = true }
 
-    @set.alias_command 'bar', 'foo'
-    @set.commands['bar'].name.should == 'bar'
-    @set.commands['bar'].description.should == ''
+      @set.alias_command 'bar', 'foo'
+      @set.commands['bar'].match.should == 'bar'
+      @set.commands['bar'].description.should == 'Alias for `foo`'
 
-    @set.run_command @ctx, 'bar'
-    run.should == true
-  end
+      @set.run_command @ctx, 'bar'
+      run.should == true
+    end
 
-  it "should be able to alias a method by the command's listing name" do
-    run = false
-    @set.command(/^foo1/, 'stuff', :listing => 'foo') { run = true }
+    it 'should inherit options from original command' do
+      run = false
+      @set.command('foo', 'stuff', :shellwords => true, :interpolate => false) { run = true }
 
-    @set.alias_command 'bar', 'foo'
-    @set.commands['bar'].name.should == 'bar'
-    @set.commands['bar'].description.should == ''
+      @set.alias_command 'bar', 'foo'
+      @set.commands['bar'].options[:shellwords].should == @set.commands['foo'].options[:shellwords]
+      @set.commands['bar'].options[:interpolate].should == @set.commands['foo'].options[:interpolate]
 
-    @set.run_command @ctx, 'bar'
-    run.should == true
+      # however some options should not be inherited
+      @set.commands['bar'].options[:listing].should.not ==  @set.commands['foo'].options[:listing]
+      @set.commands['bar'].options[:listing].should == "bar"
+    end
+
+    it 'should be able to specify alias\'s description when aliasing' do
+      run = false
+      @set.command('foo', 'stuff') { run = true }
+
+      @set.alias_command 'bar', 'foo', :desc => "tobina"
+      @set.commands['bar'].match.should == 'bar'
+      @set.commands['bar'].description.should == "tobina"
+
+      @set.run_command @ctx, 'bar'
+      run.should == true
+    end
+
+    it "should be able to alias a command by its invocation line" do
+      run = false
+      @set.command(/^foo1/, 'stuff', :listing => 'foo') { run = true }
+
+      @set.alias_command 'bar', 'foo1'
+      @set.commands['bar'].match.should == 'bar'
+      @set.commands['bar'].description.should == 'Alias for `foo1`'
+
+      @set.run_command @ctx, 'bar'
+      run.should == true
+    end
+
+    it "should be able to specify options when creating alias" do
+      run = false
+      @set.command(/^foo1/, 'stuff', :listing => 'foo') { run = true }
+
+      @set.alias_command /^b.r/, 'foo1', :listing => "bar"
+      @set.commands[/^b.r/].options[:listing].should == "bar"
+    end
+
+    it "should set description to default if description parameter is nil" do
+      run = false
+      @set.command(/^foo1/, 'stuff', :listing => 'foo') { run = true }
+
+      @set.alias_command "bar", 'foo1'
+      @set.commands["bar"].description.should == "Alias for `foo1`"
+    end
   end
 
   it 'should be able to change the descriptions of commands' do
@@ -252,27 +320,6 @@ describe Pry::CommandSet do
     }.should.not.raise
   end
 
-  it "should sort the output of the 'help' command" do
-    @set.command 'foo', "Fooerizes" do; end
-    @set.command 'goo', "Gooerizes" do; end
-    @set.command 'moo', "Mooerizes" do; end
-    @set.command 'boo', "Booerizes" do; end
-
-    @ctx[:command_set] = @set
-    @ctx[:output] = StringIO.new
-
-    @set.run_command(@ctx, 'help')
-
-    doc = @ctx[:output].string
-
-    order = [doc.index("boo"),
-             doc.index("foo"),
-             doc.index("goo"),
-             doc.index("help"),
-             doc.index("moo")]
-
-    order.should == order.sort
-  end
 
   describe "renaming a command" do
     it 'should be able to rename and run a command' do
@@ -300,7 +347,6 @@ describe Pry::CommandSet do
       @set.rename_command('bar', 'foo')
       lambda { @set.run_command(@ctx, 'foo') }.should.raise Pry::NoCommandError
     end
-
 
     it 'should be able to pass in options when renaming command' do
       desc    = "hello"
@@ -562,6 +608,20 @@ describe Pry::CommandSet do
       end
 
       @set.process_line('nannnnnny oggggg')
+    end
+  end
+
+  if defined?(Bond)
+    describe '.complete' do
+      it "should list all command names" do
+        @set.create_command('susan'){ }
+        @set.complete('sus').should.include 'susan'
+      end
+
+      it "should delegate to commands" do
+        @set.create_command('susan'){ def complete(search); ['--foo']; end }
+        @set.complete('susan ').should == ['--foo']
+      end
     end
   end
 end

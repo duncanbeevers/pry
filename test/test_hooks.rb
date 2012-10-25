@@ -316,6 +316,7 @@ describe Pry::Hooks do
         redirect_pry_io(StringIO.new("exit"), out=StringIO.new) do
           Pry.start binding, :hello => :baby
         end
+
         options[:hello].should == :baby
 
         Pry.config.hooks.delete_hook(:when_started, :test_hook)
@@ -392,6 +393,37 @@ describe Pry::Hooks do
 
         # cleanup after test
         Pry.config.exception_whitelist = old_ew
+      end
+
+      describe "before_eval hook" do
+        describe "modifying input code" do
+          it 'should replace input code with code determined by hook' do
+            hooks = Pry::Hooks.new.add_hook(:before_eval, :quirk) { |code, pry| code.replace(":little_duck") }
+            redirect_pry_io(InputTester.new(":jemima", "exit-all"), out = StringIO.new) do
+              Pry.start(self, :hooks => hooks)
+            end
+            out.string.should =~ /little_duck/
+            out.string.should.not =~ /jemima/
+          end
+
+          it 'should not interfere with command processing when replacing input code' do
+            commands = Pry::CommandSet.new do
+              import_from Pry::Commands, "exit-all"
+
+              command "how-do-you-like-your-blue-eyed-boy-now-mister-death" do
+                output.puts "in hours of bitterness i imagine balls of sapphire, of metal"
+              end
+            end
+
+            hooks = Pry::Hooks.new.add_hook(:before_eval, :quirk) { |code, pry| code.replace(":little_duck") }
+            redirect_pry_io(InputTester.new("how-do-you-like-your-blue-eyed-boy-now-mister-death", "exit-all"), out = StringIO.new) do
+              Pry.start(self, :hooks => hooks, :commands => commands)
+            end
+            out.string.should =~ /in hours of bitterness i imagine balls of sapphire, of metal/
+            out.string.should.not =~ /little_duck/
+          end
+        end
+
       end
 
       describe "exceptions" do

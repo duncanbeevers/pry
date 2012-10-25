@@ -234,4 +234,63 @@ OUTPUT
 
     @indent.indent(input).should == output
   end
+
+  it "should not indent inside strings" do
+    @indent.indent(%(def a\n"foo\nbar"\n  end)).should == %(def a\n  "foo\nbar"\nend)
+    @indent.indent(%(def a\nputs %w(foo\nbar), 'foo\nbar'\n  end)).should == %(def a\n  puts %w(foo\nbar), 'foo\nbar'\nend)
+  end
+
+  it "should not indent inside HEREDOCs" do
+    @indent.indent(%(def a\nputs <<FOO\n bar\nFOO\nbaz\nend)).should == %(def a\n  puts <<FOO\n bar\nFOO\n  baz\nend)
+    @indent.indent(%(def a\nputs <<-'^^'\n bar\n\t^^\nbaz\nend)).should == %(def a\n  puts <<-'^^'\n bar\n\t^^\n  baz\nend)
+  end
+
+  it "should not indent nested HEREDOCs" do
+    input = <<INPUT.strip
+def a
+puts <<FOO, <<-BAR, "baz", <<-':p'
+foo
+FOO
+bar
+BAR
+tongue
+:p
+puts :p
+end
+INPUT
+
+    output = <<OUTPUT.strip
+def a
+  puts <<FOO, <<-BAR, "baz", <<-':p'
+foo
+FOO
+bar
+BAR
+tongue
+:p
+  puts :p
+end
+OUTPUT
+
+    @indent.indent(input).should == output
+  end
+
+  describe "nesting" do
+      test = File.read("test/example_nesting.rb")
+
+      test.lines.each_with_index do |line, i|
+        result = line.split("#").last.strip
+        if result == ""
+          it "should fail to parse nesting on line #{i + 1} of example_nesting.rb" do
+            lambda {
+              Pry::Indent.nesting_at(test, i + 1)
+            }.should.raise(Pry::Indent::UnparseableNestingError)
+          end
+        else
+          it "should parse nesting on line #{i + 1} of example_nesting.rb" do
+            Pry::Indent.nesting_at(test, i + 1).should == eval(result)
+          end
+        end
+      end
+    end
 end

@@ -7,7 +7,7 @@ describe Pry::Code do
     end
 
     should 'read lines from Pry\'s line buffer' do
-      mock_pry(':hay_guys')
+      pry_eval ':hay_guys'
       Pry::Code.from_file('(pry)').grep(/:hay_guys/).length.should == 1
     end
 
@@ -23,10 +23,28 @@ describe Pry::Code do
       end
     end
 
+    should 'use the provided extension' do
+      temp_file('.c') do |f|
+        Pry::Code.from_file(f.path, :ruby).code_type.should == :ruby
+      end
+    end
+
     should 'raise an error if the file doesn\'t exist' do
       proc do
         Pry::Code.from_file('/knalkjsdnalsd/alkjdlkq')
-      end.should.raise(Pry::CommandError)
+      end.should.raise(MethodSource::SourceNotFoundError)
+    end
+
+    should 'check for files relative to origin pwd' do
+      Dir.chdir('test') do |f|
+        Pry::Code.from_file('test/' + File.basename(__FILE__)).code_type.should == :ruby
+      end
+    end
+
+    should 'find files that are relative to the current working directory' do
+      Dir.chdir('test') do |f|
+        Pry::Code.from_file(File.basename(__FILE__)).code_type.should == :ruby
+      end
     end
   end
 

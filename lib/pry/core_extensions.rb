@@ -1,47 +1,123 @@
+class Pry
+  # @return [Array] Code of the method used when implementing Pry's
+  #   __binding__, along with line indication to be used with instance_eval (and
+  #   friends).
+  #
+  # @see Object#__binding__
+  BindingImplMethod = [<<-METHOD, __FILE__, __LINE__ + 1]
+    # Get a binding with 'self' set to self, and no locals.
+    #
+    # The default definee is determined by the context in which the
+    # definition is eval'd.
+    #
+    # Please don't call this method directly, see {__binding__}.
+    #
+    # @return [Binding]
+    def __pry__
+      binding
+    end
+  METHOD
+end
+
 class Object
-  # Start a Pry REPL.
-  # This method differs from `Pry.start` in that it does not
-  # support an options hash. Also, when no parameter is provided, the Pry
-  # session will start on the implied receiver rather than on
-  # top-level (as in the case of `Pry.start`).
-  # It has two forms of invocation. In the first form no parameter
-  # should be provided and it will start a pry session on the
-  # receiver. In the second form it should be invoked without an
-  # explicit receiver and one parameter; this will start a Pry
-  # session on the parameter.
-  # @param [Object, Binding] target The receiver of the Pry session.
-  # @example First form
+  # Start a Pry REPL on self.
+  #
+  # If `self` is a Binding then that will be used to evaluate expressions;
+  # otherwise a new binding will be created.
+  #
+  # @param [Object] object  the object or binding to pry
+  #                         (__deprecated__, use `object.pry`)
+  # @param [Hash] hash  the options hash
+  # @example With a binding
+  #    binding.pry
+  # @example On any object
   #   "dummy".pry
-  # @example Second form
-  #    pry "dummy"
-  # @example Start a Pry session on current self (whatever that is)
-  #   pry
-  def pry(target=self)
-    Pry.config.object_pry_handler.call(target)
+  # @example With options
+  #   def my_method
+  #     binding.pry :quiet => true
+  #   end
+  #   my_method()
+  # @see Pry.start
+  def pry(object=nil, hash={})
+    target, options = object, hash
+
+    if object.nil? || Hash === object
+      target = self
+      options = object || {}
+    end
+    Pry.config.object_pry_handler.call(target, options)
   end
 
   # Return a binding object for the receiver.
+  #
+  # The `self` of the binding is set to the current object, and it contains no
+  # local variables.
+  #
+  # The default definee (http://yugui.jp/articles/846) is set such that:
+  #
+  # * If `self` is a class or module, then new methods created in the binding
+  #   will be defined in that class or module (as in `class Foo; end`).
+  # * If `self` is a normal object, then new methods created in the binding will
+  #   be defined on its singleton class (as in `class << self; end`).
+  # * If `self` doesn't have a  real singleton class (i.e. it is a Fixnum, Float,
+  #   Symbol, nil, true, or false), then new methods will be created on the
+  #   object's class (as in `self.class.class_eval{ }`)
+  #
+  # Newly created constants, including classes and modules, will also be added
+  # to the default definee.
+  #
+  # @return [Binding]
   def __binding__
+    # If you ever feel like changing this method, be careful about variables
+    # that you use. They shouldn't be inserted into the binding that will
+    # eventually be returning.
+
+    # When you're cd'd into a class, methods you define should be added to it.
     if is_a?(Module)
+      # class_eval sets both self and the default definee to this class.
       return class_eval "binding"
     end
 
-    unless respond_to? :__binding_impl__
+    unless respond_to?(:__pry__)
+      # The easiest way to check whether an object has a working singleton class
+      # is to try and define a method on it. (just checking for the presence of
+      # the singleton class gives false positives for `true` and `false`).
+      # __pry__ is just the closest method we have to hand, and using
+      # it has the nice property that we can memoize this check.
       begin
-        instance_eval %{
-          def __binding_impl__
-            binding
-          end
-        }
+        # instance_eval sets the default definee to the object's singleton class
+        instance_eval(*Pry::BindingImplMethod)
+
+      # If we can't define methods on the Object's singleton_class. Then we fall
+      # back to setting the default definee to be the Object's class. That seems
+      # nicer than having a REPL in which you can't define methods.
       rescue TypeError
-        self.class.class_eval %{
-          def __binding_impl__
-            binding
-          end
-        }
+        # class_eval sets the default definee to self.class
+        self.class.class_eval(*Pry::BindingImplMethod)
       end
     end
 
-    __binding_impl__
+    __pry__
+  end
+end
+
+# There's a splat bug on jruby in 1.9 emulation mode, which breaks the
+# pp library.
+#
+# * http://jira.codehaus.org/browse/JRUBY-6687
+# * https://github.com/pry/pry/issues/568
+#
+# Until that gets fixed upstream, let's monkey-patch here:
+if [[1, 2]].pretty_inspect == "[1]\n"
+  class Array
+    def pretty_print(q)
+      q.group(1, '[', ']') {
+        i = 0
+        q.seplist(self) { |*|
+          q.pp self[i]
+          i += 1
+        }
+      }
+    end
   end
 end

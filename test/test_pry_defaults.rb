@@ -1,5 +1,11 @@
 require 'helper'
+
+version = 1
+
 describe "test Pry defaults" do
+  before do
+    @str_output = StringIO.new
+  end
 
   after do
     Pry.reset_defaults
@@ -7,7 +13,6 @@ describe "test Pry defaults" do
   end
 
   describe "input" do
-
     after do
       Pry.reset_defaults
       Pry.color = false
@@ -16,13 +21,12 @@ describe "test Pry defaults" do
     it 'should set the input default, and the default should be overridable' do
       Pry.input = InputTester.new("5")
 
-      str_output = StringIO.new
-      Pry.output = str_output
+      Pry.output = @str_output
       Pry.new.rep
-      str_output.string.should =~ /5/
+      @str_output.string.should =~ /5/
 
       Pry.new(:input => InputTester.new("6")).rep
-      str_output.string.should =~ /6/
+      @str_output.string.should =~ /6/
     end
 
     it 'should pass in the prompt if readline arity is 1' do
@@ -73,19 +77,18 @@ describe "test Pry defaults" do
   it 'should set the output default, and the default should be overridable' do
     Pry.input = InputTester.new("5", "6", "7")
 
-    str_output = StringIO.new
-    Pry.output = str_output
+    Pry.output = @str_output
 
     Pry.new.rep
-    str_output.string.should =~ /5/
+    @str_output.string.should =~ /5/
 
     Pry.new.rep
-    str_output.string.should =~ /5\n.*6/
+    @str_output.string.should =~ /5\n.*6/
 
-    str_output2 = StringIO.new
-    Pry.new(:output => str_output2).rep
-    str_output2.string.should.not =~ /5\n.*6/
-    str_output2.string.should =~ /7/
+    @str_output = StringIO.new
+    Pry.new(:output => @str_output).rep
+    @str_output.string.should.not =~ /5\n.*6/
+    @str_output.string.should =~ /7/
   end
 
   it "should set the print default, and the default should be overridable" do
@@ -93,19 +96,18 @@ describe "test Pry defaults" do
     Pry.print =  new_print
 
     Pry.new.print.should == Pry.print
-    str_output = StringIO.new
-    Pry.new(:input => InputTester.new("\"test\""), :output => str_output).rep
-    str_output.string.should == "test\n"
+    Pry.new(:input => InputTester.new("\"test\""), :output => @str_output).rep
+    @str_output.string.should == "test\n"
 
-    str_output = StringIO.new
-    Pry.new(:input => InputTester.new("\"test\""), :output => str_output,
+    @str_output = StringIO.new
+    Pry.new(:input => InputTester.new("\"test\""), :output => @str_output,
             :print => proc { |out, value| out.puts value.reverse }).rep
-    str_output.string.should == "tset\n"
+    @str_output.string.should == "tset\n"
 
     Pry.new.print.should == Pry.print
-    str_output = StringIO.new
-    Pry.new(:input => InputTester.new("\"test\""), :output => str_output).rep
-    str_output.string.should == "test\n"
+    @str_output = StringIO.new
+    Pry.new(:input => InputTester.new("\"test\""), :output => @str_output).rep
+    @str_output.string.should == "test\n"
   end
 
   describe "pry return values" do
@@ -332,47 +334,84 @@ describe "test Pry defaults" do
 
   end
 
+  describe 'quiet' do
+    it 'should show whereami by default' do
+      Pry.start(binding, :input => InputTester.new("1", "exit-all"),
+              :output => @str_output,
+              :hooks => Pry::DEFAULT_HOOKS)
+
+      @str_output.string.should =~ /[w]hereami by default/
+    end
+
+    it 'should hide whereami if quiet is set' do
+      Pry.new(:input => InputTester.new("exit-all"),
+              :output => @str_output,
+              :quiet => true,
+              :hooks => Pry::DEFAULT_HOOKS)
+
+      @str_output.string.should == ""
+    end
+  end
+
+  describe 'toplevel_binding' do
+    it 'should be devoid of local variables' do
+      pry_eval(Pry.toplevel_binding, "ls -l").should.not =~ /version/
+    end
+
+    it 'should have self the same as TOPLEVEL_BINDING' do
+      Pry.toplevel_binding.eval('self').should.equal? TOPLEVEL_BINDING.eval('self')
+    end
+
+    # https://github.com/rubinius/rubinius/issues/1779
+    unless Pry::Helpers::BaseHelpers.rbx?
+      it 'should define private methods on Object' do
+        TOPLEVEL_BINDING.eval 'def gooey_fooey; end'
+        method(:gooey_fooey).owner.should == Object
+        Pry::Method(method(:gooey_fooey)).visibility.should == :private
+      end
+    end
+  end
+
   it 'should set the hooks default, and the default should be overridable' do
     Pry.input = InputTester.new("exit-all")
     Pry.hooks = Pry::Hooks.new.
       add_hook(:before_session, :my_name) { |out,_,_|  out.puts "HELLO" }.
       add_hook(:after_session, :my_name) { |out,_,_| out.puts "BYE" }
 
-    str_output = StringIO.new
-    Pry.new(:output => str_output).repl
-    str_output.string.should =~ /HELLO/
-    str_output.string.should =~ /BYE/
+    Pry.new(:output => @str_output).repl
+    @str_output.string.should =~ /HELLO/
+    @str_output.string.should =~ /BYE/
 
     Pry.input.rewind
 
-    str_output = StringIO.new
-    Pry.new(:output => str_output,
+    @str_output = StringIO.new
+    Pry.new(:output => @str_output,
             :hooks => Pry::Hooks.new.
             add_hook( :before_session, :my_name) { |out,_,_| out.puts "MORNING" }.
             add_hook(:after_session, :my_name) { |out,_,_| out.puts "EVENING" }
             ).repl
 
-    str_output.string.should =~ /MORNING/
-    str_output.string.should =~ /EVENING/
+    @str_output.string.should =~ /MORNING/
+    @str_output.string.should =~ /EVENING/
 
     # try below with just defining one hook
     Pry.input.rewind
-    str_output = StringIO.new
-    Pry.new(:output => str_output,
+    @str_output = StringIO.new
+    Pry.new(:output => @str_output,
             :hooks => Pry::Hooks.new.
             add_hook(:before_session, :my_name) { |out,_,_| out.puts "OPEN" }
             ).repl
 
-    str_output.string.should =~ /OPEN/
+    @str_output.string.should =~ /OPEN/
 
     Pry.input.rewind
-    str_output = StringIO.new
-    Pry.new(:output => str_output,
+    @str_output = StringIO.new
+    Pry.new(:output => @str_output,
             :hooks => Pry::Hooks.new.
             add_hook(:after_session, :my_name) { |out,_,_| out.puts "CLOSE" }
             ).repl
 
-    str_output.string.should =~ /CLOSE/
+    @str_output.string.should =~ /CLOSE/
 
     Pry.reset_defaults
     Pry.color = false

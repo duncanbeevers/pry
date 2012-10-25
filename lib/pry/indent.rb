@@ -1,6 +1,12 @@
 require 'coderay'
 
 class Pry
+  # Load io-console if possible, so that we can use $stdout.winsize.
+  begin
+    require 'io/console'
+  rescue LoadError
+  end
+
   ##
   # Pry::Indent is a class that can be used to indent a number of lines
   # containing Ruby code similar as to how IRB does it (but better). The class
@@ -9,8 +15,16 @@ class Pry
   # will be indented or un-indented by correctly.
   #
   class Indent
-    # String containing the spaces to be inserted before the next line.
+    include Helpers::BaseHelpers
+
+    # Raised if {#module_nesting} would not work.
+    class UnparseableNestingError < StandardError; end
+
+    # @return [String] String containing the spaces to be inserted before the next line.
     attr_reader :indent_level
+
+    # @return [Array<String>] The stack of open tokens.
+    attr_reader :stack
 
     # The amount of spaces to insert for each indent level.
     SPACES = '  '
@@ -46,7 +60,7 @@ class Pry
     #
     # :pre_constant and :preserved_constant are the CodeRay 0.9.8 and 1.0.0
     # classifications of "true", "false", and "nil".
-    IGNORE_TOKENS = [:space, :content, :string, :delimiter, :method, :ident,
+    IGNORE_TOKENS = [:space, :content, :string, :method, :ident,
                      :constant, :pre_constant, :predefined_constant]
 
     # Tokens that indicate the end of a statement (i.e. that, if they appear
@@ -55,11 +69,38 @@ class Pry
     #
     # :reserved and :keywords are the CodeRay 0.9.8 and 1.0.0 respectively
     # classifications of "super", "next", "return", etc.
-    STATEMENT_END_TOKENS = IGNORE_TOKENS + [:regexp, :integer, :float, :keyword, :reserved]
+    STATEMENT_END_TOKENS = IGNORE_TOKENS + [:regexp, :integer, :float, :keyword,
+                                            :delimiter, :reserved]
 
     # Collection of tokens that should appear dedented even though they
     # don't affect the surrounding code.
     MIDWAY_TOKENS = %w(when else elsif ensure rescue)
+
+    # Clean the indentation of a fragment of ruby.
+    #
+    # @param [String] str
+    # @return [String]
+    def self.indent(str)
+      new.indent(str)
+    end
+
+    # Get the module nesting at the given point in the given string.
+    #
+    # NOTE If the line specified contains a method definition, then the nesting
+    # at the start of the method definition is used. Otherwise the nesting from
+    # the end of the line is used.
+    #
+    # @param String str  The ruby code to analyze
+    # @param Fixnum line_number  The line number (starting from 1)
+    # @return [Array<String>]
+    def self.nesting_at(str, line_number)
+      indent = new
+      lines = str.split("\n")
+      n = line_number - 1
+      to_indent = lines[0...n] + (lines[n] || "").split("def").first(1)
+      indent.indent(to_indent.join("\n") + "\n")
+      indent.module_nesting
+    end
 
     def initialize
       reset
@@ -69,6 +110,11 @@ class Pry
     def reset
       @stack = []
       @indent_level = ''
+      @heredoc_queue = []
+      @close_heredocs = {}
+      @string_start = nil
+      @awaiting_class = false
+      @module_nesting = []
       self
     end
 
@@ -94,24 +140,45 @@ class Pry
     # @return [String] The indented version of +input+.
     #
     def indent(input)
-      output      = ''
-      open_tokens = OPEN_TOKENS.keys
+      output = ''
       prefix = indent_level
 
       input.lines.each do |line|
-        tokens = CodeRay.scan(line, :ruby)
-        tokens = tokens.tokens.each_slice(2) if tokens.respond_to?(:tokens) # Coderay 1.0.0
+
+        if in_string?
+          tokens = tokenize("#{open_delimiters_line}\n#{line}")
+          tokens = tokens.drop_while{ |token, type| !(String === token && token.include?("\n")) }
+          previously_in_string = true
+        else
+          tokens = tokenize(line)
+          previously_in_string = false
+        end
 
         before, after = indentation_delta(tokens)
 
         before.times{ prefix.sub! SPACES, '' }
-        output += prefix + line.strip + "\n"
-        prefix += SPACES * after
+        new_prefix = prefix + SPACES * after
+
+        line = prefix + line.lstrip unless previously_in_string
+
+        output += line
+
+        prefix = new_prefix
       end
 
       @indent_level = prefix
 
-      return output.gsub(/\s+$/, '')
+      return output
+    end
+
+    # Get the indentation for the start of the next line.
+    #
+    # This is what's used between the prompt and the cursor in pry.
+    #
+    # @return String  The correct number of spaces
+    #
+    def current_prefix
+      in_string? ? '' : indent_level
     end
 
     # Get the change in indentation indicated by the line.
@@ -155,13 +222,18 @@ class Pry
         last_token, last_kind = token, kind unless kind == :space
         next if IGNORE_TOKENS.include?(kind)
 
+        track_module_nesting(token, kind)
+
         seen_for_at << add_after if token == "for"
 
-        if OPEN_TOKENS.keys.include?(token) && !is_optional_do && !is_singleline_if
+        if kind == :delimiter
+          track_delimiter(token)
+        elsif OPEN_TOKENS.keys.include?(token) && !is_optional_do && !is_singleline_if
           @stack << token
           add_after += 1
         elsif token == OPEN_TOKENS[@stack.last]
-          @stack.pop
+          popped = @stack.pop
+          track_module_nesting_end(popped)
           if add_after == 0
             remove_before += 1
           else
@@ -184,34 +256,177 @@ class Pry
       (last_token =~ /^[)\]}\/]$/ || STATEMENT_END_TOKENS.include?(last_kind))
     end
 
+    # Are we currently in the middle of a string literal.
+    #
+    # This is used to determine whether to re-indent a given line, we mustn't re-indent
+    # within string literals because to do so would actually change the value of the
+    # String!
+    #
+    # @return Boolean
+    def in_string?
+      !open_delimiters.empty?
+    end
+
+    # Given a string of Ruby code, use CodeRay to export the tokens.
+    #
+    # @param [String] string The Ruby to lex
+    # @return [Array] An Array of pairs of [token_value, token_type]
+    def tokenize(string)
+      tokens = CodeRay.scan(string, :ruby)
+      tokens = tokens.tokens.each_slice(2) if tokens.respond_to?(:tokens) # Coderay 1.0.0
+      tokens.to_a
+    end
+
+    # Update the internal state about what kind of strings are open.
+    #
+    # Most of the complication here comes from the fact that HEREDOCs can be nested. For
+    # normal strings (which can't be nested) we assume that CodeRay correctly pairs
+    # open-and-close delimiters so we don't bother checking what they are.
+    #
+    # @param [String] token The token (of type :delimiter)
+    def track_delimiter(token)
+      case token
+      when /^<<-(["'`]?)(.*)\\1/
+        @heredoc_queue << token
+        @close_heredocs[token] = /^\s*$2/
+      when @close_heredocs[@heredoc_queue.first]
+        @heredoc_queue.shift
+      else
+        if @string_start
+          @string_start = nil
+        else
+          @string_start = token
+        end
+      end
+    end
+
+    # All the open delimiters, in the order that they first appeared.
+    #
+    # @return [String]
+    def open_delimiters
+      @heredoc_queue + [@string_start].compact
+    end
+
+    # Return a string which restores the CodeRay string status to the correct value by
+    # opening HEREDOCs and strings.
+    #
+    # @return String
+    def open_delimiters_line
+      "puts #{open_delimiters.join(", ")}"
+    end
+
+    # Update the internal state relating to module nesting.
+    #
+    # It's responsible for adding to the @module_nesting array, which looks
+    # something like:
+    #
+    # [ ["class", "Foo"], ["module", "Bar::Baz"], ["class <<", "self"] ]
+    #
+    # A nil value in the @module_nesting array happens in two places: either
+    # when @awaiting_token is true and we're still waiting for the string to
+    # fill that space, or when a parse was rejected.
+    #
+    # At the moment this function is quite restricted about what formats it will
+    # parse, for example we disallow expressions after the class keyword. This
+    # could maybe be improved in the future.
+    #
+    # @param [String] token  a token from Coderay
+    # @param [Symbol] kind  the kind of that token
+    def track_module_nesting(token, kind)
+      if kind == :keyword && (token == "class" || token == "module")
+        @module_nesting << [token, nil]
+        @awaiting_class = true
+      elsif @awaiting_class
+        if kind == :operator && token == "<<" && @module_nesting.last[0] == "class"
+          @module_nesting.last[0] = "class <<"
+          @awaiting_class = true
+        elsif kind == :class && token =~ /\A(self|[A-Z:][A-Za-z0-9_:]*)\z/
+          @module_nesting.last[1] = token if kind == :class
+          @awaiting_class = false
+        else
+          # leave @nesting[-1][
+          @awaiting_class = false
+        end
+      end
+    end
+
+    # Update the internal state relating to module nesting on 'end'.
+    #
+    # If the current 'end' pairs up with a class or a module then we should
+    # pop an array off of @module_nesting
+    #
+    # @param [String] token  a token from Coderay
+    # @param [Symbol] kind  the kind of that token
+    def track_module_nesting_end(token, kind=:keyword)
+      if kind == :keyword && (token == "class" || token == "module")
+        @module_nesting.pop
+      end
+    end
+
+    # Return a list of strings which can be used to re-construct the Module.nesting at
+    # the current point in the file.
+    #
+    # Returns nil if the syntax of the file was not recognizable.
+    #
+    # @return [Array<String>]
+    def module_nesting
+      @module_nesting.map do |(kind, token)|
+        raise UnparseableNestingError, @module_nesting.inspect if token.nil?
+
+        "#{kind} #{token}"
+      end
+    end
+
     # Return a string which, when printed, will rewrite the previous line with
     # the correct indentation. Mostly useful for fixing 'end'.
     #
-    # @param [String] full_line The full line of input, including the prompt.
+    # @param [String] prompt The user's prompt
+    # @param [String] code   The code the user just typed in.
     # @param [Fixnum] overhang (0) The number of chars to erase afterwards (i.e.,
     #   the difference in length between the old line and the new one).
     # @return [String]
-    def correct_indentation(full_line, overhang=0)
-      if Readline.respond_to?(:get_screen_size)
-        _, cols = Readline.get_screen_size
-        lines = full_line.length / cols + 1
-      elsif ENV['COLUMNS'] && ENV['COLUMNS'] != ''
-        cols = ENV['COLUMNS'].to_i
-        lines = full_line.length / cols + 1
-      else
-        lines = 1
-      end
+    def correct_indentation(prompt, code, overhang=0)
+      full_line = prompt + code
+      whitespace = ' ' * overhang
 
-      if defined?(Win32::Console)
+      _, cols = screen_size
+
+      cols = cols.to_i
+      lines = cols != 0 ? (full_line.length / cols + 1) : 1
+
+      if Pry::Helpers::BaseHelpers.windows_ansi?
         move_up   = "\e[#{lines}F"
         move_down = "\e[#{lines}E"
       else
         move_up   = "\e[#{lines}A\e[0G"
         move_down = "\e[#{lines}B\e[0G"
       end
-      whitespace = ' ' * overhang
 
-      "#{move_up}#{full_line}#{whitespace}#{move_down}"
+      "#{move_up}#{prompt}#{colorize_code(code)}#{whitespace}#{move_down}"
+    end
+
+    # Return a pair of [rows, columns] which gives the size of the window.
+    #
+    # If the window size cannot be determined, return nil.
+    def screen_size
+      [
+         # io/console adds a winsize method to IO streams.
+         $stdout.tty? && $stdout.respond_to?(:winsize) && $stdout.winsize,
+
+         # Some readlines also provides get_screen_size.
+         Readline.respond_to?(:get_screen_size) && Readline.get_screen_size,
+
+         # Otherwise try to use the environment (this may be out of date due
+         # to window resizing, but it's better than nothing).
+         [ENV["ROWS"], ENV["COLUMNS"],
+
+         # If the user is running within ansicon, then use the screen size
+         # that it reports (same caveats apply as with ROWS and COLUMNS)
+         ENV['ANSICON'] =~ /\((.*)x(.*)\)/ && [$2, $1]
+        ]
+      ].detect do |(_, cols)|
+        cols.to_i > 0
+      end
     end
   end
 end

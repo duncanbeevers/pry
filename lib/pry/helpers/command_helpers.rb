@@ -23,21 +23,45 @@ class Pry
         end
       end
 
+      # Return the file and line for a Binding.
+      # @param [Binding] target The binding
+      # @return [Array] The file and line
+      def file_and_line_from_binding(target)
+        file = target.eval('__FILE__')
+        line_num = target.eval('__LINE__')
+        if rbx?
+          if !target.instance_variable_defined?(:@__actual_file__)
+            target.instance_variable_set(:@__actual_file__, RbxPath.convert_path_to_full(target.variables.method.file.to_s))
+          end
+          file = target.instance_variable_get(:@__actual_file__).to_s
+        end
+
+        [file, line_num]
+      end
+
+      def internal_binding?(target)
+        m = target.eval("::Kernel.__method__").to_s
+        # class_eval is here because of http://jira.codehaus.org/browse/JRUBY-6753
+        ["__binding__", "__pry__", "class_eval"].include?(m)
+      end
+
       def get_method_or_raise(name, target, opts={}, omit_help=false)
         meth = Pry::Method.from_str(name, target, opts)
 
         if name && !meth
-          command_error("The method '#{name}' could not be found.", omit_help)
-        elsif !meth
-          command_error("No method name given, and context is not a method.", omit_help, NonMethodContextError)
+          command_error("The method '#{name}' could not be found.", omit_help, MethodNotFound)
         end
 
         (opts[:super] || 0).times do
           if meth.super
             meth = meth.super
           else
-            command_error("'#{meth.name_with_owner}' has no super method.", omit_help)
+            command_error("'#{meth.name_with_owner}' has no super method.", omit_help, MethodNotFound)
           end
+        end
+
+        if !meth || (!name && internal_binding?(target))
+          command_error("No method name given, and context is not a method.", omit_help, MethodNotFound)
         end
 
         set_file_and_dir_locals(meth.source_file)
@@ -53,7 +77,7 @@ class Pry
         header = "\n#{Pry::Helpers::Text.bold('From:')} #{meth.source_file} "
 
         if meth.source_type == :c
-          header << "in Ruby Core (C Method):\n"
+          header << "(C Method):\n"
         else
           header << "@ line #{meth.source_line}:\n"
         end
@@ -61,48 +85,13 @@ class Pry
         header << "#{Pry::Helpers::Text.bold("Number of lines:")} #{content.each_line.count.to_s}\n"
       end
 
-      def process_rdoc(comment, code_type)
-        comment = comment.dup
-        comment.gsub(/<code>(?:\s*\n)?(.*?)\s*<\/code>/m) { Pry.color ? CodeRay.scan($1, code_type).term : $1 }.
-          gsub(/<em>(?:\s*\n)?(.*?)\s*<\/em>/m) { Pry.color ? "\e[1m#{$1}\e[0m": $1 }.
-          gsub(/<i>(?:\s*\n)?(.*?)\s*<\/i>/m) { Pry.color ? "\e[1m#{$1}\e[0m" : $1 }.
-          gsub(/\B\+(\w*?)\+\B/)  { Pry.color ? "\e[32m#{$1}\e[0m": $1 }.
-          gsub(/((?:^[ \t]+.+(?:\n+|\Z))+)/)  { Pry.color ? CodeRay.scan($1, code_type).term : $1 }.
-          gsub(/`(?:\s*\n)?(.*?)\s*`/) { Pry.color ? CodeRay.scan($1, code_type).term : $1 }
-      end
-
-      def process_yardoc_tag(comment, tag)
-        in_tag_block = nil
-        comment.lines.map do |v|
-          if in_tag_block && v !~ /^\S/
-            Pry::Helpers::Text.strip_color Pry::Helpers::Text.strip_color(v)
-          elsif in_tag_block
-            in_tag_block = false
-            v
-          else
-            in_tag_block = true if v =~ /^@#{tag}/
-            v
-          end
-        end.join
-      end
-
-      def process_yardoc(comment)
-        yard_tags = ["param", "return", "option", "yield", "attr", "attr_reader", "attr_writer",
-                     "deprecate", "example"]
-        (yard_tags - ["example"]).inject(comment) { |a, v| process_yardoc_tag(a, v) }.
-          gsub(/^@(#{yard_tags.join("|")})/) { Pry.color ? "\e[33m#{$1}\e[0m": $1 }
-      end
-
-      def process_comment_markup(comment, code_type)
-        process_yardoc process_rdoc(comment, code_type)
-      end
-
-      def invoke_editor(file, line)
-        raise CommandError, "Please set Pry.config.editor or export $EDITOR" unless Pry.config.editor
+      def invoke_editor(file, line, reloading)
+        raise CommandError, "Please set Pry.config.editor or export $VISUAL or $EDITOR" unless Pry.config.editor
         if Pry.config.editor.respond_to?(:call)
-          editor_invocation = Pry.config.editor.call(file, line)
+          args = [file, line, reloading][0...(Pry.config.editor.arity)]
+          editor_invocation = Pry.config.editor.call(*args)
         else
-          editor_invocation = "#{Pry.config.editor} #{start_line_syntax_for_editor(file, line)}"
+          editor_invocation = "#{Pry.config.editor} #{blocking_flag_for_editor(reloading)} #{start_line_syntax_for_editor(file, line)}"
         end
         return nil unless editor_invocation
 
@@ -122,6 +111,22 @@ class Pry
         end
       end
 
+      # Some editors that run outside the terminal allow you to control whether or
+      # not to block the process from which they were launched (in this case, Pry).
+      # For those editors, return the flag that produces the desired behavior.
+      def blocking_flag_for_editor(block)
+        case editor_name
+        when /^emacsclient/
+          '--no-wait' unless block
+        when /^[gm]vim/
+          '--nofork' if block
+        when /^jedit/
+          '-wait' if block
+        when /^mate/, /^subl/
+          '-w' if block
+        end
+      end
+
       # Return the syntax for a given editor for starting the editor
       # and moving to a particular line within that file
       def start_line_syntax_for_editor(file_name, line_number)
@@ -132,11 +137,13 @@ class Pry
         # special case for 1st line
         return file_name if line_number <= 1
 
-        case Pry.config.editor
+        case editor_name
         when /^[gm]?vi/, /^emacs/, /^nano/, /^pico/, /^gedit/, /^kate/
           "+#{line_number} #{file_name}"
         when /^mate/, /^geany/
           "-l #{line_number} #{file_name}"
+        when /^subl/
+          "#{file_name}:#{line_number}"
         when /^uedit32/
           "#{file_name}/#{line_number}"
         when /^jedit/
@@ -148,6 +155,20 @@ class Pry
             "+#{line_number} #{file_name}"
           end
         end
+      end
+
+      # Get the name of the binary that Pry.config.editor points to.
+      #
+      # This is useful for deciding which flags we pass to the editor as
+      # we can just use the program's name and ignore any absolute paths.
+      #
+      # @example
+      #   Pry.config.editor="/home/conrad/bin/textmate -w"
+      #   editor_name
+      #   # => textmate
+      #
+      def editor_name
+        File.basename(Pry.config.editor).split(" ").first
       end
 
       # Remove any common leading whitespace from every line in `text`.
@@ -162,10 +183,7 @@ class Pry
       #       "Ut enim ad minim veniam."
       #   USAGE
       #
-      # @param  [String] The text from which to remove indentation
-      # @return [String], The text with indentation stripped.
-      #
-      # @copyright Heavily based on textwrap.dedent from Python, which is:
+      # Heavily based on textwrap.dedent from Python, which is:
       #   Copyright (C) 1999-2001 Gregory P. Ward.
       #   Copyright (C) 2002, 2003 Python Software Foundation.
       #   Written by Greg Ward <gward@python.net>
@@ -173,7 +191,9 @@ class Pry
       #   Licensed under <http://docs.python.org/license.html>
       #   From <http://hg.python.org/cpython/file/6b9f0a6efaeb/Lib/textwrap.py>
       #
-      def unindent(text)
+      # @param [String] text The text from which to remove indentation
+      # @return [String] The text with indentation stripped.
+      def unindent(text, left_padding = 0)
         # Empty blank lines
         text = text.sub(/^[ \t]+$/, '')
 
@@ -188,7 +208,7 @@ class Pry
           end
         end
 
-        text.gsub(/^#{margin}/, '')
+        text.gsub(/^#{margin}/, ' ' * left_padding)
       end
 
       # Restrict a string to the given range of lines (1-indexed)

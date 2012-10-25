@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+require 'pry/helpers/documentation_helpers'
+
 class Pry
   class << self
     # If the given object is a `Pry::Method`, return it unaltered. If it's
@@ -12,8 +14,11 @@ class Pry
     end
   end
 
+  # This class wraps the normal `Method` and `UnboundMethod` classes
+  # to provide extra functionality useful to Pry.
   class Method
     include RbxMethod if Helpers::BaseHelpers.rbx?
+    include Helpers::DocumentationHelpers
 
     class << self
       # Given a string representing a method name and optionally a binding to
@@ -57,12 +62,16 @@ class Pry
       # @return [Pry::Method, nil]
       #
       def from_binding(b)
-        meth_name = b.eval('__method__')
-        if [:__script__, nil, :__binding__, :__binding_impl__].include?(meth_name)
+        meth_name = b.eval('::Kernel.__method__')
+        if [:__script__, nil].include?(meth_name)
           nil
         else
           method = begin
-                     new(b.eval("method(#{meth_name.to_s.inspect})"))
+                     if Object === b.eval('self')
+                       new(Kernel.instance_method(:method).bind(b.eval("self")).call(meth_name))
+                     else
+                       new(b.eval('class << self; self; end.instance_method(::Kernel.__method__).bind(self)'))
+                     end
                    rescue NameError, NoMethodError
                      Disowned.new(b.eval('self'), meth_name.to_s)
                    end
@@ -109,7 +118,7 @@ class Pry
       # @param [String] name
       # @return [Pry::Method, nil]
       def from_class(klass, name)
-        new(klass.instance_method(name)) rescue nil
+        new(safe_send(klass, :instance_method, name)) rescue nil
       end
       alias from_module from_class
 
@@ -121,21 +130,23 @@ class Pry
       # @param [String] name
       # @return [Pry::Method, nil]
       def from_obj(obj, name)
-        new(obj.method(name)) rescue nil
+        new(safe_send(obj, :method, name)) rescue nil
       end
 
       # Get all of the instance methods of a `Class` or `Module`
       # @param [Class,Module] klass
+      # @param [Boolean] include_super Whether to include methods from ancestors.
       # @return [Array[Pry::Method]]
-      def all_from_class(klass)
-        all_from_common(klass, :instance_method)
+      def all_from_class(klass, include_super=true)
+        all_from_common(klass, :instance_method, include_super)
       end
 
       # Get all of the methods on an `Object`
       # @param [Object] obj
+      # @param [Boolean] include_super Whether to include methods from ancestors.
       # @return [Array[Pry::Method]]
-      def all_from_obj(obj)
-        all_from_common(obj, :method)
+      def all_from_obj(obj, include_super=true)
+        all_from_common(obj, :method, include_super)
       end
 
       # Get every `Class` and `Module`, in order, that will be checked when looking
@@ -168,9 +179,9 @@ class Pry
       # If method_type is :method, obj can be any `Object`
       #
       # N.B. we pre-cache the visibility here to avoid O(N²) behaviour in "ls".
-      def all_from_common(obj, method_type)
+      def all_from_common(obj, method_type, include_super=true)
         %w(public protected private).map do |visibility|
-          safe_send(obj, :"#{visibility}_#{method_type}s").map do |method_name|
+          safe_send(obj, :"#{visibility}_#{method_type}s", include_super).map do |method_name|
             new(safe_send(obj, method_type, method_name), :visibility => visibility.to_sym)
           end
         end.flatten(1)
@@ -183,6 +194,7 @@ class Pry
       def safe_send(obj, method, *args, &block)
         (Module === obj ? Module : Object).instance_method(method).bind(obj).call(*args, &block)
       end
+      public :safe_send
 
       # Get the singleton classes of superclasses that could define methods on
       # the given class object, and any modules they include.
@@ -202,7 +214,7 @@ class Pry
     # A new instance of `Pry::Method` wrapping the given `::Method`, `UnboundMethod`, or `Proc`.
     #
     # @param [::Method, UnboundMethod, Proc] method
-    # @param [Hash] known_info, can be used to pre-cache expensive to compute stuff.
+    # @param [Hash] known_info Can be used to pre-cache expensive to compute stuff.
     # @return [Pry::Method]
     def initialize(method, known_info={})
       @method = method
@@ -239,21 +251,33 @@ class Pry
     # @return [String, nil] The source code of the method, or `nil` if it's unavailable.
     def source
       @source ||= case source_type
-        when :c
-          info = pry_doc_info
-          if info and info.source
-            code = strip_comments_from_c_code(info.source)
-          end
-        when :ruby
-          if Helpers::BaseHelpers.rbx? && core?
-            code = core_code
-          elsif pry_method?
-            code = Pry.new(:input => StringIO.new(Pry.line_buffer[source_line..-1].join), :prompt => proc {""}, :hooks => Pry::Hooks.new).r
-          else
-            code = @method.source
-          end
-          strip_leading_whitespace(code)
-        end
+                  when :c
+                    info = pry_doc_info
+                    if info and info.source
+                      code = strip_comments_from_c_code(info.source)
+                    end
+                  when :ruby
+                    # clone of MethodSource.source_helper that knows to use our
+                    # hacked version of source_location for rbx core methods, and
+                    # our input buffer for methods defined in (pry)
+                    file, line = *source_location
+                    raise SourceNotFoundError, "Could not locate source for #{name_with_owner}!" unless file
+
+                    begin
+                      code = Pry::Code.from_file(file).expression_at(line)
+                    rescue SyntaxError => e
+                      raise MethodSource::SourceNotFoundError.new(e.message)
+                    end
+                    strip_leading_whitespace(code)
+                  end
+    end
+
+    # Can we get the source code for this method?
+    # @return [Boolean]
+    def source?
+      !!source
+    rescue MethodSource::SourceNotFoundError
+      false
     end
 
     # @return [String, nil] The documentation for the method, or `nil` if it's
@@ -265,10 +289,10 @@ class Pry
           info = pry_doc_info
           info.docstring if info
         when :ruby
-          if Helpers::BaseHelpers.rbx? && core?
+          if Helpers::BaseHelpers.rbx? && !pry_method?
             strip_leading_hash_and_whitespace_from_ruby_comments(core_doc)
           elsif pry_method?
-            raise CommandError, "Can't view doc for a REPL-defined method."
+            strip_leading_hash_and_whitespace_from_ruby_comments(doc_for_pry_method)
           else
             strip_leading_hash_and_whitespace_from_ruby_comments(@method.comment)
           end
@@ -279,6 +303,15 @@ class Pry
     #   `:ruby` for Ruby methods or `:c` for methods written in C.
     def source_type
       source_location.nil? ? :c : :ruby
+    end
+
+    def source_location
+      if @method.source_location && Helpers::BaseHelpers.rbx?
+        file, line = @method.source_location
+        [RbxPath.convert_path_to_full(file), line]
+      else
+        @method.source_location
+      end
     end
 
     # @return [String, nil] The name of the file the method is defined in, or
@@ -303,7 +336,7 @@ class Pry
     # @return [Range, nil] The range of lines in `source_file` which contain
     #    the method's definition, or `nil` if that information is unavailable.
     def source_range
-      source_location.nil? ? nil : (source_line)...(source_line + source.lines.count)
+      source_location.nil? ? nil : (source_line)..(source_line + source.lines.count - 1)
     end
 
     # @return [Symbol] The visibility of the method. May be `:public`,
@@ -374,6 +407,24 @@ class Pry
       source_file == Pry.eval_path
     end
 
+    # @return [Array<String>] All known aliases for the method.
+    # @note On Ruby 1.8 this method always returns an empty Array for methods
+    #   implemented in C.
+    def aliases
+      owner = @method.owner
+      # Avoid using `to_sym` on {Method#name}, which returns a `String`, because
+      # it won't be garbage collected.
+      name = @method.name
+
+      alias_list = owner.instance_methods.combination(2).select do |pair|
+        pair.include?(name) &&
+          owner.instance_method(pair.first) == owner.instance_method(pair.last)
+      end.flatten
+      alias_list.delete(name)
+
+      alias_list.map(&:to_s)
+    end
+
     # @return [Boolean] Is the method definitely an alias?
     def alias?
       name != original_name
@@ -382,7 +433,7 @@ class Pry
     # @return [Boolean]
     def ==(obj)
       if obj.is_a? Pry::Method
-        super
+        obj == @method
       else
         @method == obj
       end
@@ -411,35 +462,32 @@ class Pry
       # @raise [CommandError] Raises when the method can't be found or `pry-doc` isn't installed.
       def pry_doc_info
         if Pry.config.has_pry_doc
-          Pry::MethodInfo.info_for(@method) or raise CommandError, "Cannot locate this method: #{name}."
+          Pry::MethodInfo.info_for(@method) or raise CommandError, "Cannot locate this method: #{name}. (source_location returns nil)"
         else
           raise CommandError, "Cannot locate this method: #{name}. Try `gem install pry-doc` to get access to Ruby Core documentation."
         end
       end
 
-      # @param [String] code
-      # @return [String]
-      def strip_comments_from_c_code(code)
-        code.sub(/\A\s*\/\*.*?\*\/\s*/m, '')
+      # FIXME: a very similar method to this exists on WrappedModule: extract_doc_for_candidate
+      def doc_for_pry_method
+        _, line_num = source_location
+
+        buffer = ""
+        Pry.line_buffer[0..(line_num - 1)].each do |line|
+          # Add any line that is a valid ruby comment,
+          # but clear as soon as we hit a non comment line.
+          if (line =~ /^\s*#/) || (line =~ /^\s*$/)
+            buffer << line.lstrip
+          else
+            buffer.replace("")
+          end
+        end
+
+        buffer
       end
 
-      # @param [String] comment
-      # @return [String]
-      def strip_leading_hash_and_whitespace_from_ruby_comments(comment)
-        comment = comment.dup
-        comment.gsub!(/\A\#+?$/, '')
-        comment.gsub!(/^\s*#/, '')
-        strip_leading_whitespace(comment)
-      end
-
-      # @param [String] text
-      # @return [String]
-      def strip_leading_whitespace(text)
-        Pry::Helpers::CommandHelpers.unindent(text)
-      end
-
-      # @param [Class,Module] the ancestors to investigate
-      # @return [Method] the unwrapped super-method
+      # @param [Class, Module] ancestors The ancestors to investigate
+      # @return [Method] The unwrapped super-method
       def super_using_ancestors(ancestors, times=1)
         next_owner = self.owner
         times.times do
@@ -488,14 +536,20 @@ class Pry
       #
       # @param [Object] receiver
       # @param [String] method_name
-      def initialize(*args)
-        @receiver, @name = *args
+      def initialize(receiver, method_name)
+        @receiver, @name = receiver, method_name
       end
 
       # Is the method undefined? (aka `Disowned`)
       # @return [Boolean] true
       def undefined?
         true
+      end
+
+      # Can we get the source for this method?
+      # @return [Boolean] false
+      def source?
+        false
       end
 
       # Get the hypothesized owner of the method.

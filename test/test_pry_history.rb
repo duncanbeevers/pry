@@ -23,6 +23,21 @@ describe Pry do
     Pry.history.restore_default_behavior
   end
 
+  describe '#push' do
+    it "should not record duplicated lines" do
+      Pry.history << '3'
+      Pry.history << '_ += 1'
+      Pry.history << '_ += 1'
+      Pry.history.to_a.grep('_ += 1').count.should == 1
+    end
+
+    it "should not record empty lines" do
+      c = Pry.history.to_a.count
+      Pry.history << ''
+      Pry.history.to_a.count.should == c
+    end
+  end
+
   describe ".load_history" do
     it "should read the contents of the file" do
       Pry.history.to_a[-2..-1].should == %w(2 3)

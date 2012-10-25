@@ -1,7 +1,7 @@
 class Pry
   class NoCommandError < StandardError
-    def initialize(name, owner)
-      super "Command '#{name}' not found in command set #{owner}"
+    def initialize(match, owner)
+      super "Command '#{match}' not found in command set #{owner}"
     end
   end
 
@@ -21,15 +21,13 @@ class Pry
       @commands      = {}
       @helper_module = Module.new
 
-      define_default_commands
       import(*imported_sets)
 
       instance_eval(&block) if block
     end
 
     # Defines a new Pry command.
-    # @param [String, Regexp] name The name of the command. Can be
-    #   Regexp as well as String.
+    # @param [String, Regexp] match The start of invocations of this command.
     # @param [String] description A description of the command.
     # @param [Hash] options The optional configuration parameters.
     # @option options [Boolean] :keep_retval Whether or not to use return value
@@ -44,7 +42,7 @@ class Pry
     #   executing the command. Defaults to true.
     # @option options [String] :listing The listing name of the
     #   command. That is the name by which the command is looked up by
-    #   help and by show-command. Necessary for regex based commands.
+    #   help and by show-command. Necessary for commands with regex matches.
     # @option options [Boolean] :use_prefix Whether the command uses
     #   `Pry.config.command_prefix` prefix (if one is defined). Defaults
     #   to true.
@@ -81,21 +79,20 @@ class Pry
     #   # hello john, nice number: 10
     #   # pry(main)> help number
     #   # number-N regex command
-    def block_command(name, description="No description.", options={}, &block)
+    def block_command(match, description="No description.", options={}, &block)
       description, options = ["No description.", description] if description.is_a?(Hash)
-      options = default_options(name).merge!(options)
+      options = default_options(match).merge!(options)
 
-      commands[name] = Pry::BlockCommand.subclass(name, description, options, helper_module, &block)
+      commands[match] = Pry::BlockCommand.subclass(match, description, options, helper_module, &block)
     end
     alias_method :command, :block_command
 
     # Defines a new Pry command class.
     #
-    # @param [String, Regexp] name The name of the command. Can be
-    #   Regexp as well as String.
+    # @param [String, Regexp] match The start of invocations of this command.
     # @param [String] description A description of the command.
     # @param [Hash] options The optional configuration parameters, see {#command}
-    # @param &Block  The class body's definition.
+    # @yield The class body's definition.
     #
     # @example
     #   Pry::Commands.create_command "echo", "echo's the input", :shellwords => false do
@@ -114,40 +111,40 @@ class Pry
     #     end
     #   end
     #
-    def create_command(name, description="No description.", options={}, &block)
+    def create_command(match, description="No description.", options={}, &block)
       description, options = ["No description.", description] if description.is_a?(Hash)
-      options = default_options(name).merge!(options)
+      options = default_options(match).merge!(options)
 
-      commands[name] = Pry::ClassCommand.subclass(name, description, options, helper_module, &block)
-      commands[name].class_eval(&block)
-      commands[name]
+      commands[match] = Pry::ClassCommand.subclass(match, description, options, helper_module, &block)
+      commands[match].class_eval(&block)
+      commands[match]
     end
 
     # Execute a block of code before a command is invoked. The block also
     # gets access to parameters that will be passed to the command and
     # is evaluated in the same context.
-    # @param [String, Regexp] name The name of the command.
+    # @param [String, Regexp] search The match or listing of the command.
     # @yield The block to be run before the command.
     # @example Display parameter before invoking command
     #   Pry.commands.before_command("whereami") do |n|
     #     output.puts "parameter passed was #{n}"
     #   end
-    def before_command(name, &block)
-      cmd = find_command_by_name_or_listing(name)
+    def before_command(search, &block)
+      cmd = find_command_by_match_or_listing(search)
       cmd.hooks[:before].unshift block
     end
 
     # Execute a block of code after a command is invoked. The block also
     # gets access to parameters that will be passed to the command and
     # is evaluated in the same context.
-    # @param [String, Regexp] name The name of the command.
+    # @param [String, Regexp] search The match or listing of the command.
     # @yield The block to be run after the command.
     # @example Display text 'command complete' after invoking command
     #   Pry.commands.after_command("whereami") do |n|
     #     output.puts "command complete!"
     #   end
-    def after_command(name, &block)
-      cmd = find_command_by_name_or_listing(name)
+    def after_command(search, &block)
+      cmd = find_command_by_match_or_listing(search)
       cmd.hooks[:after] << block
     end
 
@@ -155,100 +152,130 @@ class Pry
       @commands.each(&block)
     end
 
+    # Add a given command object to this set.
+    # @param [Command] command The subclass of Pry::Command you wish to add.
+    def add_command(command)
+      commands[command.match] = command
+    end
+
     # Removes some commands from the set
-    # @param [Array<String>] names name of the commands to remove
-    def delete(*names)
-      names.each do |name|
-        cmd = find_command_by_name_or_listing(name)
-        commands.delete cmd.name
+    # @param [Array<String>] searches the matches or listings of the commands to remove
+    def delete(*searches)
+      searches.each do |search|
+        cmd = find_command_by_match_or_listing(search)
+        commands.delete cmd.match
       end
     end
 
     # Imports all the commands from one or more sets.
     # @param [Array<CommandSet>] sets Command sets, all of the commands of which
     #   will be imported.
+    # @return [Pry::CommandSet] Returns the reciever (a command set).
     def import(*sets)
       sets.each do |set|
         commands.merge! set.commands
         helper_module.send :include, set.helper_module
       end
+      self
     end
 
     # Imports some commands from a set
     # @param [CommandSet] set Set to import commands from
-    # @param [Array<String>] names Commands to import
-    def import_from(set, *names)
+    # @param [Array<String>] matches Commands to import
+    # @return [Pry::CommandSet] Returns the reciever (a command set).
+    def import_from(set, *matches)
       helper_module.send :include, set.helper_module
-      names.each do |name|
-        cmd = set.find_command_by_name_or_listing(name)
-        commands[cmd.name] = cmd
+      matches.each do |match|
+        cmd = set.find_command_by_match_or_listing(match)
+        commands[cmd.match] = cmd
       end
+      self
     end
 
-    # @param [String, Regexp] name_or_listing The name or listing name
+    # @param [String, Regexp] match_or_listing The match or listing of a command.
     #   of the command to retrieve.
     # @return [Command] The command object matched.
-    def find_command_by_name_or_listing(name_or_listing)
-      if commands[name_or_listing]
-        cmd = commands[name_or_listing]
+    def find_command_by_match_or_listing(match_or_listing)
+      if commands[match_or_listing]
+        cmd = commands[match_or_listing]
       else
-        _, cmd = commands.find { |name, command| command.options[:listing] == name_or_listing }
+        _, cmd = commands.find { |match, command| command.options[:listing] == match_or_listing }
       end
 
-      raise ArgumentError, "Cannot find a command with name: '#{name_or_listing}'!" if !cmd
+      raise ArgumentError, "Cannot find a command: '#{match_or_listing}'!" if !cmd
       cmd
     end
-    protected :find_command_by_name_or_listing
+    protected :find_command_by_match_or_listing
 
     # Aliases a command
-    # @param [String] new_name New name of the command.
-    # @param [String] old_name Old name of the command.
-    # @param [String, nil] desc New description of the command.
-    def alias_command(new_name, old_name, desc="")
-      orig_command = find_command_by_name_or_listing(old_name)
-      commands[new_name] = orig_command.dup
-      commands[new_name].name = new_name
-      commands[new_name].description = desc
+    # @param [String, Regex] match The match of the alias (can be a regex).
+    # @param [String] action The action to be performed (typically
+    #   another command).
+    # @param [Hash] options The optional configuration parameters,
+    #   accepts the same as the `command` method, but also allows the
+    #   command description to be passed this way too as `:desc`
+    # @example Creating an alias for `ls -M`
+    #   Pry.config.commands.alias_command "lM", "ls -M"
+    # @example Pass explicit description (overriding default).
+    #   Pry.config.commands.alias_command "lM", "ls -M", :desc => "cutiepie"
+    def alias_command(match, action,  options={})
+      cmd = find_command(action) or fail "Command: `#{action}` not found"
+      original_options = cmd.options.dup
+
+      options = original_options.merge!({
+                                          :desc => "Alias for `#{action}`",
+                                          :listing => match
+                                        }).merge!(options)
+
+      # ensure default description is used if desc is nil
+      desc = options.delete(:desc).to_s
+
+      c = block_command match, desc, options do |*args|
+        run action, *args
+      end
+
+      c.group "Aliases"
+
+      c
     end
 
-    # Rename a command. Accepts either actual name or listing name for
-    # the `old_name`.
-    # `new_name` must be the actual name of the new command.
-    # @param [String, Regexp] new_name The new name for the command.
-    # @param [String, Regexp] old_name The command's current name.
+    # Rename a command. Accepts either match or listing for the search.
+    #
+    # @param [String, Regexp] new_match The new match for the command.
+    # @param [String, Regexp] search The command's current match or listing.
     # @param [Hash] options The optional configuration parameters,
     #   accepts the same as the `command` method, but also allows the
     #   command description to be passed this way too.
     # @example Renaming the `ls` command and changing its description.
     #   Pry.config.commands.rename "dir", "ls", :description => "DOS friendly ls"
-    def rename_command(new_name, old_name, options={})
-      cmd = find_command_by_name_or_listing(old_name)
+    def rename_command(new_match, search, options={})
+      cmd = find_command_by_match_or_listing(search)
 
       options = {
-        :listing     => new_name,
+        :listing     => new_match,
         :description => cmd.description
       }.merge!(options)
 
-      commands[new_name] = cmd.dup
-      commands[new_name].name = new_name
-      commands[new_name].description = options.delete(:description)
-      commands[new_name].options.merge!(options)
-      commands.delete(cmd.name)
+      commands[new_match] = cmd.dup
+      commands[new_match].match = new_match
+      commands[new_match].description = options.delete(:description)
+      commands[new_match].options.merge!(options)
+      commands.delete(cmd.match)
     end
 
     # Sets or gets the description for a command (replacing the old
     # description). Returns current description if no description
     # parameter provided.
-    # @param [String, Regexp] name The command name.
-    # @param [String] description The command description.
+    # @param [String, Regexp] search The command match.
+    # @param [String?] description (nil) The command description.
     # @example Setting
     #   MyCommands = Pry::CommandSet.new do
     #     desc "help", "help description"
     #   end
     # @example Getting
     #   Pry.config.commands.desc "amend-line"
-    def desc(name, description=nil)
-      cmd = find_command_by_name_or_listing(name)
+    def desc(search, description=nil)
+      cmd = find_command_by_match_or_listing(search)
       return cmd.description if !description
 
       cmd.description = description
@@ -277,27 +304,35 @@ class Pry
     end
 
     # Find a command that matches the given line
-    #
-    # @param [String]  the line that may be a command invocation
+    # @param [String] val The line that might be a command invocation
     # @return [Pry::Command, nil]
     def find_command(val)
       commands.values.select{ |c| c.matches?(val) }.sort_by{ |c| c.match_score(val) }.last
     end
+    alias_method :[], :find_command
+
+    # Find the command that the user might be trying to refer to.
+    # @param [String] search The user's search.
+    # @return [Pry::Command?]
+    def find_command_for_help(search)
+      find_command(search) || (begin
+        find_command_by_match_or_listing(search)
+      rescue ArgumentError
+        nil
+      end)
+    end
 
     # Is the given line a command invocation?
-    #
-    # @param [String]
+    # @param [String] val
     # @return [Boolean]
     def valid_command?(val)
       !!find_command(val)
     end
 
     # Process the given line to see whether it needs executing as a command.
-    #
-    # @param String  the line to execute
-    # @param Hash  the context to execute the commands with
-    # @return CommandSet::Result
-    #
+    # @param [String] val The line to execute
+    # @param [Hash] context The context to execute the commands with
+    # @return [CommandSet::Result]
     def process_line(val, context={})
       if command = find_command(val)
         context = context.merge(:command_set => self)
@@ -308,106 +343,39 @@ class Pry
       end
     end
 
-    # @nodoc  used for testing
-    def run_command(context, name, *args)
-      command = commands[name] or raise NoCommandError.new(name, self)
+    # @private (used for testing)
+    def run_command(context, match, *args)
+      command = commands[match] or raise NoCommandError.new(match, self)
       command.new(context).call_safely(*args)
+    end
+
+    # Generate completions for the user's search.
+    # @param [String] search The line to search for
+    # @param [Hash] context  The context to create the command with
+    # @return [Array<String>]
+    def complete(search, context={})
+      if command = find_command(search)
+        command.new(context).complete(search)
+      else
+        commands.keys.select do |x|
+          String === x && x.start_with?(search)
+        end + Bond::DefaultMission.completions
+      end
     end
 
     private
 
-    def default_options(name)
+    def default_options(match)
       {
         :requires_gem => [],
         :keep_retval => false,
         :argument_required => false,
         :interpolate => true,
         :shellwords => true,
-        :listing => name,
-        :use_prefix => true
+        :listing => (String === match ? match : match.inspect),
+        :use_prefix => true,
+        :takes_block => false
       }
-    end
-
-    def define_default_commands
-
-      create_command "help" do |cmd|
-        description "Show a list of commands, or help for one command"
-
-        banner <<-BANNER
-          Usage: help [ COMMAND ]
-
-          With no arguments, help lists all the available commands in the current
-          command-set along with their description.
-
-          When given a command name as an argument, shows the help for that command.
-        BANNER
-
-        def process
-          if cmd = args.first
-            if command = find_command(cmd)
-              output.puts command.new.help
-            else
-              output.puts "No info for command: #{cmd}"
-            end
-          else
-            output.puts
-            help_text = heading("Command List: ") + "\n"
-
-            help_text << commands.map do |key, command|
-              if command.description && !command.description.empty?
-                "#{command.options[:listing].to_s.ljust(18)} #{command.description}"
-              end
-            end.compact.sort.join("\n")
-
-            stagger_output(help_text)
-          end
-        end
-      end
-
-      create_command "install-command", "Install a disabled command." do |name|
-
-        banner <<-BANNER
-          Usage: install-command COMMAND
-
-          Installs the gems necessary to run the given COMMAND. You will generally not
-          need to run this unless told to by an error message.
-        BANNER
-
-        def process(name)
-          require 'rubygems/dependency_installer' unless defined? Gem::DependencyInstaller
-          command = find_command(name)
-
-          if command_dependencies_met?(command.options)
-            output.puts "Dependencies for #{command.name} are met. Nothing to do."
-            return
-          end
-
-          output.puts "Attempting to install `#{name}` command..."
-          gems_to_install = Array(command.options[:requires_gem])
-
-          gems_to_install.each do |g|
-            next if gem_installed?(g)
-            output.puts "Installing `#{g}` gem..."
-
-            begin
-              Gem::DependencyInstaller.new.install(g)
-            rescue Gem::GemNotFoundException
-              raise CommandError, "Required Gem: `#{g}` not found. Aborting command installation."
-            end
-          end
-
-          Gem.refresh
-          gems_to_install.each do |g|
-            begin
-              require g
-            rescue LoadError
-              raise CommandError, "Required Gem: `#{g}` installed but not found?!. Aborting command installation."
-            end
-          end
-
-          output.puts "Installation of `#{name}` successful! Type `help #{name}` for information"
-        end
-      end
     end
   end
 

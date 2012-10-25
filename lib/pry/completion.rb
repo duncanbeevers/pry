@@ -1,14 +1,27 @@
 # taken from irb
 
-require "readline"
-
 class Pry
+
+  module BondCompleter
+
+    def self.build_completion_proc(target, pry=nil, commands=[""])
+      Bond.restart(:eval_binding => lambda{ pry.current_context })
+      Bond.complete(:on => /\A/) do |input|
+        Pry.commands.complete(input.line,
+                             :pry_instance => pry,
+                             :target       => pry.current_context,
+                             :command_set  => pry.commands)
+      end
+
+      proc{ |*a| Bond.agent.call(*a) }
+    end
+  end
 
   # Implements tab completion for Readline in Pry
   module InputCompleter
 
     if Readline.respond_to?("basic_word_break_characters=")
-      Readline.basic_word_break_characters= " \t\n\"\\'`><=;|&{("
+      Readline.basic_word_break_characters = " \t\n\"\\'`><=;|&{("
     end
 
     Readline.completion_append_character = nil
@@ -41,162 +54,233 @@ class Pry
     # Return a new completion proc for use by Readline.
     # @param [Binding] target The current binding context.
     # @param [Array<String>] commands The array of Pry commands.
-    def self.build_completion_proc(target, commands=[""])
+    def self.build_completion_proc(target, pry=nil, commands=[""])
+
       proc do |input|
-        bind = target
 
-        case input
-        when /^(\/[^\/]*\/)\.([^.]*)$/
-          # Regexp
-          receiver = $1
-          message = Regexp.quote($2)
+        # if there are multiple contexts e.g. cd 1/2/3
+        # get new target for 1/2 and find candidates for 3
+        path, input = build_path(input)
 
-          candidates = Regexp.instance_methods.collect{|m| m.to_s}
-          select_message(receiver, message, candidates)
+        unless path.call.empty?
+          target, _ = Pry::Helpers::BaseHelpers.context_from_object_path(path.call, pry) 
+          target = target.last
+        end
+        
+        begin
+          bind = target
 
-        when /^([^\]]*\])\.([^.]*)$/
-          # Array
-          receiver = $1
-          message = Regexp.quote($2)
+          case input
 
-          candidates = Array.instance_methods.collect{|m| m.to_s}
-          select_message(receiver, message, candidates)
 
-        when /^([^\}]*\})\.([^.]*)$/
-          # Proc or Hash
-          receiver = $1
-          message = Regexp.quote($2)
+          # Complete stdlib symbols
 
-          candidates = Proc.instance_methods.collect{|m| m.to_s}
-          candidates |= Hash.instance_methods.collect{|m| m.to_s}
-          select_message(receiver, message, candidates)
+          when /^(\/[^\/]*\/)\.([^.]*)$/
+            # Regexp
+            receiver = $1
+            message = Regexp.quote($2)
 
-        when /^(:[^:.]*)$/
-          # Symbol
-          if Symbol.respond_to?(:all_symbols)
-            sym = $1
-            candidates = Symbol.all_symbols.collect{|s| ":" + s.id2name}
-            candidates.grep(/^#{sym}/)
-          else
-            []
-          end
+            candidates = Regexp.instance_methods.collect(&:to_s)
+            select_message(path, receiver, message, candidates)
 
-        when /^::([A-Z][^:\.\(]*)$/
-          # Absolute Constant or class methods
-          receiver = $1
-          candidates = Object.constants.collect{|m| m.to_s}
-          candidates.grep(/^#{receiver}/).collect{|e| "::" + e}
+          when /^([^\]]*\])\.([^.]*)$/
+            # Array
+            receiver = $1
+            message = Regexp.quote($2)
 
-        when /^([A-Z].*)::([^:.]*)$/
-          # Constant or class methods
-          receiver = $1
-          message = Regexp.quote($2)
-          begin
-            candidates = eval("#{receiver}.constants.collect{|m| m.to_s}", bind)
-            candidates |= eval("#{receiver}.methods.collect{|m| m.to_s}", bind)
-          rescue RescuableException
-            candidates = []
-          end
-          candidates.grep(/^#{message}/).collect{|e| receiver + "::" + e}
+            candidates = Array.instance_methods.collect(&:to_s)
+            select_message(path, receiver, message, candidates)
 
-        when /^(:[^:.]+)\.([^.]*)$/
-          # Symbol
-          receiver = $1
-          message = Regexp.quote($2)
+          when /^([^\}]*\})\.([^.]*)$/
+            # Proc or Hash
+            receiver = $1
+            message = Regexp.quote($2)
 
-          candidates = Symbol.instance_methods.collect{|m| m.to_s}
-          select_message(receiver, message, candidates)
+            candidates = Proc.instance_methods.collect(&:to_s)
+            candidates |= Hash.instance_methods.collect(&:to_s)
+            select_message(path, receiver, message, candidates)
 
-        when /^(-?(0[dbo])?[0-9_]+(\.[0-9_]+)?([eE]-?[0-9]+)?)\.([^.]*)$/
-          # Numeric
-          receiver = $1
-          message = Regexp.quote($5)
+          when /^(:[^:.]*)$/
+            # Symbol
+            if Symbol.respond_to?(:all_symbols)
+              sym        = Regexp.quote($1)
+              candidates = Symbol.all_symbols.collect{|s| ":" + s.id2name}
 
-          begin
-            candidates = eval(receiver, bind).methods.collect{|m| m.to_s}
-          rescue RescuableException
-            candidates = []
-          end
-          select_message(receiver, message, candidates)
+              candidates.grep(/^#{sym}/)
+            else
+              []
+            end
 
-        when /^(-?0x[0-9a-fA-F_]+)\.([^.]*)$/
-          # Numeric(0xFFFF)
-          receiver = $1
-          message = Regexp.quote($2)
+          when /^::([A-Z][^:\.\(]*)$/
+            # Absolute Constant or class methods
+            receiver = $1
+            candidates = Object.constants.collect(&:to_s)
+            candidates.grep(/^#{receiver}/).collect{|e| "::" + e}
 
-          begin
-            candidates = eval(receiver, bind).methods.collect{|m| m.to_s}
-          rescue RescuableException
-            candidates = []
-          end
-          select_message(receiver, message, candidates)
+          
+          # Complete target symbols
 
-        when /^(\$[^.]*)$/
-          regmessage = Regexp.new(Regexp.quote($1))
-          candidates = global_variables.collect{|m| m.to_s}.grep(regmessage)
+          when /^([A-Z][A-Za-z0-9]*)$/
+            # Constant
+            message = $1
 
-        when /^([^."].*)\.([^.]*)$/
-          # variable
-          receiver = $1
-          message = Regexp.quote($2)
-
-          gv = eval("global_variables", bind).collect{|m| m.to_s}
-          lv = eval("local_variables", bind).collect{|m| m.to_s}
-          cv = eval("self.class.constants", bind).collect{|m| m.to_s}
-
-          if (gv | lv | cv).include?(receiver) or /^[A-Z]/ =~ receiver && /\./ !~ receiver
-            # foo.func and foo is local var. OR
-            # Foo::Bar.func
             begin
-              candidates = eval("#{receiver}.methods", bind).collect{|m| m.to_s}
+              context = target.eval("self")
+              context = context.class unless context.respond_to? :constants
+              candidates = context.constants.collect(&:to_s)
+            rescue
+              candidates = []
+            end
+            candidates = candidates.grep(/^#{message}/).collect(&path)
+
+          when /^([A-Z].*)::([^:.]*)$/  
+            # Constant or class methods
+            receiver = $1
+            message = Regexp.quote($2)
+            begin
+              candidates = eval("#{receiver}.constants.collect(&:to_s)", bind)
+              candidates |= eval("#{receiver}.methods.collect(&:to_s)", bind)
             rescue RescuableException
               candidates = []
             end
-          else
-            # func1.func2
-            candidates = []
-            ObjectSpace.each_object(Module){|m|
+            candidates.grep(/^#{message}/).collect{|e| receiver + "::" + e}
+
+          when /^(:[^:.]+)\.([^.]*)$/
+            # Symbol
+            receiver = $1
+            message = Regexp.quote($2)
+
+            candidates = Symbol.instance_methods.collect(&:to_s)
+            select_message(path, receiver, message, candidates)
+
+          when /^(-?(0[dbo])?[0-9_]+(\.[0-9_]+)?([eE]-?[0-9]+)?)\.([^.]*)$/
+            # Numeric
+            receiver = $1
+            message = Regexp.quote($5)
+
+            begin
+              candidates = eval(receiver, bind).methods.collect(&:to_s)
+            rescue RescuableException
+              candidates = []
+            end
+            select_message(path, receiver, message, candidates)
+
+          when /^(-?0x[0-9a-fA-F_]+)\.([^.]*)$/#
+            # Numeric(0xFFFF)
+            receiver = $1
+            message = Regexp.quote($2)
+
+            begin
+              candidates = eval(receiver, bind).methods.collect(&:to_s)
+            rescue RescuableException
+              candidates = []
+            end
+            select_message(path, receiver, message, candidates)
+
+          when /^(\$[^.]*)$/
+            # Global variables
+            regmessage = Regexp.new(Regexp.quote($1))
+            candidates = global_variables.collect(&:to_s).grep(regmessage)
+
+          when /^([^."].*)\.([^.]*)$/  
+            # Variable
+            receiver = $1
+            message = Regexp.quote($2)
+
+            gv = eval("global_variables", bind).collect(&:to_s)
+            lv = eval("local_variables", bind).collect(&:to_s)
+            cv = eval("self.class.constants", bind).collect(&:to_s)
+
+            if (gv | lv | cv).include?(receiver) or /^[A-Z]/ =~ receiver && /\./ !~ receiver
+              # foo.func and foo is local var. OR
+              # Foo::Bar.func
               begin
-                name = m.name.to_s
+                candidates = eval("#{receiver}.methods", bind).collect(&:to_s)
               rescue RescuableException
-                name = ""
+                candidates = []
               end
-              next if name != "IRB::Context" and
-              /^(IRB|SLex|RubyLex|RubyToken)/ =~ name
-              candidates.concat m.instance_methods(false).collect{|x| x.to_s}
-            }
-            candidates.sort!
-            candidates.uniq!
+            else
+              # func1.func2
+              candidates = []
+              ObjectSpace.each_object(Module){|m|
+                begin
+                  name = m.name.to_s
+                rescue RescuableException
+                  name = ""
+                end
+                next if name != "IRB::Context" and
+                /^(IRB|SLex|RubyLex|RubyToken)/ =~ name
+
+                # jruby doesn't always provide #instance_methods() on each
+                # object.
+                if m.respond_to?(:instance_methods)
+                  candidates.concat m.instance_methods(false).collect(&:to_s)
+                end
+              }
+              candidates.sort!
+              candidates.uniq!
+            end
+            select_message(path, receiver, message, candidates)
+
+          when /^\.([^.]*)$/
+            # Unknown(maybe String)
+            receiver = ""
+            message = Regexp.quote($1)
+
+            candidates = String.instance_methods(true).collect(&:to_s)
+            select_message(path, receiver, message, candidates)
+
+          else
+
+            candidates = eval(
+              "methods | private_methods | local_variables | " \
+                "self.class.constants | instance_variables",
+              bind
+            ).collect(&:to_s)
+
+            if eval("respond_to?(:class_variables)", bind)
+              candidates += eval("class_variables", bind).collect(&:to_s)
+            end
+            candidates = (candidates|ReservedWords|commands).grep(/^#{Regexp.quote(input)}/)
+            candidates.collect(&path)
           end
-          select_message(receiver, message, candidates)
-
-        when /^\.([^.]*)$/
-          # unknown(maybe String)
-
-          receiver = ""
-          message = Regexp.quote($1)
-
-          candidates = String.instance_methods(true).collect{|m| m.to_s}
-          select_message(receiver, message, candidates)
-
-        else
-          candidates = eval("methods | private_methods | local_variables | self.class.constants", bind).collect{|m| m.to_s}
-
-          (candidates|ReservedWords|commands).grep(/^#{Regexp.quote(input)}/)
+        rescue RescuableException
+          []
         end
       end
     end
 
-    def self.select_message(receiver, message, candidates)
+    def self.select_message(path, receiver, message, candidates)
       candidates.grep(/^#{message}/).collect do |e|
-      	case e
-      	when /^[a-zA-Z_]/
-      	  receiver + "." + e
-      	when /^[0-9]/
-      	when *Operators
-      	  #receiver + " " + e
-      	end
+        case e
+        when /^[a-zA-Z_]/
+          path.call(receiver + "." + e)
+        when /^[0-9]/
+        when *Operators
+          #receiver + " " + e
+        end
       end
+    end
+
+    # build_path seperates the input into two parts: path and input.
+    # input is the partial string that should be completed
+    # path is a proc that takes an input and builds a full path. 
+    def self.build_path(input)
+
+      # check to see if the input is a regex
+      return proc {|input| input.to_s }, input if input[/\/\./]
+
+      trailing_slash = input.end_with?('/')
+      contexts = input.chomp('/').split(/\//)
+      input = contexts[-1]
+
+      path = proc do |input|
+        p = contexts[0..-2].push(input).join('/')
+        p += '/' if trailing_slash && !input.nil?
+        p
+      end
+
+      return path, input
     end
   end
 end

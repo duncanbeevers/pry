@@ -1,4 +1,5 @@
 [![Build Status](https://secure.travis-ci.org/pry/pry.png)](http://travis-ci.org/pry/pry)
+
 <center>
 ![Alt text](http://dl.dropbox.com/u/26521875/pry_logo_350.png)
 
@@ -20,8 +21,8 @@
 </center>
 
 Pry is a powerful alternative to the standard IRB shell for Ruby. It is
-written from scratch to provide a number of advanced features, some of
-these include:
+written from scratch to provide a number of advanced features,
+including:
 
 * Source code browsing (including core C source with the pry-doc gem)
 * Documentation browsing
@@ -35,7 +36,9 @@ these include:
 * Exotic object support (BasicObject instances, IClasses, ...)
 * A Powerful and flexible command system
 * Ability to view and replay history
+
 * Many convenience commands inspired by IPython, Smalltalk and other advanced REPLs
+* A wide-range number of [plugins](https://github.com/pry/pry/wiki/Available-plugins) that provide remote sessions, full debugging functionality, and more.
 
 Pry also aims to be more than an IRB replacement; it is an
 attempt to bring REPL driven programming to the Ruby language. It is
@@ -79,7 +82,7 @@ Pry command will show a list of all private instance methods (in
 scope) that begin with 'pa'
 
     pry(YARD::Parser::SourceParser):5> ls -Mp --grep ^pa
-    [:parser_class, :parser_type=, :parser_type_for_filename]
+    YARD::Parser::SourceParser#methods: parse  parser_class  parser_type  parser_type=  parser_type_for_filename
 
 ### Navigating around state
 
@@ -97,7 +100,7 @@ an instance variable inside that class:
     => 20
     pry(main)> cd Hello
     pry(Hello):1> ls -i
-    => [:@x]
+    instance variables: @x
     pry(Hello):1> cd @x
     pry(20:2)> self + 10
     => 30
@@ -121,8 +124,6 @@ We can then jump back to any of the previous nesting levels by using
 the `jump-to` command:
 
     pry("friend":3)> jump-to 1
-    Ending Pry session for "friend"
-    Ending Pry session for 100
     => 100
     pry(Hello):1>
 
@@ -223,8 +224,8 @@ In the following example we will enter the `Pry` class, list the
 instance methods beginning with 're' and display the source code for the `rep` method:
 
     pry(main)> cd Pry
-    pry(Pry):1> ls -M --grep ^re
-    [:re, :readline, :rep, :repl, :repl_epilogue, :repl_prologue, :retrieve_line]
+    pry(Pry)> ls -M --grep re
+    Pry#methods: re  readline  refresh  rep  repl  repl_epilogue  repl_prologue  retrieve_line
     pry(Pry):1> show-method rep -l
 
     From: /home/john/ruby/projects/pry/lib/pry/pry_instance.rb @ line 143:
@@ -279,7 +280,7 @@ picked up by `rdoc`. Pry also has a basic understanding of both the
 rdoc and yard formats and will attempt to syntax highlight the
 documentation appropriately.
 
-Nonetheless The `ri` functionality is very good and
+Nonetheless, the `ri` functionality is very good and
 has an advantage over Pry's system in that it allows documentation
 lookup for classes as well as methods. Pry therefore has good
 integration with  `ri` through the `ri` command. The syntax
@@ -319,12 +320,12 @@ We can also use `ri` in the normal way:
 ### Gist integration
 
 If the `gist` gem is installed then method source or documentation can be gisted to github with the
-`gist-method` command. The `gist-method` command accepts the same two
-syntaxes as `show-method`. In the example below we will gist the C source
+`gist` command.  The `gist` command is capable of gisting [almost any REPL content](https://gist.github.com/cae143e4533416529726), including methods, documentation,
+input expressions, command source, and so on. In the example below we will gist the C source
 code for the `Symbol#to_proc` method to github:
 
-    pry(main)> gist-method Symbol#to_proc
-    https://gist.github.com/5332c38afc46d902ce46
+    pry(main)> gist -m Symbol#to_proc
+    Gist created at https://gist.github.com/5332c38afc46d902ce46 and added to clipboard.
     pry(main)>
 
 You can see the actual gist generated here: [https://gist.github.com/5332c38afc46d902ce46](https://gist.github.com/5332c38afc46d902ce46)
@@ -363,6 +364,8 @@ avaiable.
 
 MyArtChannel has kindly provided a hack to replace the `rails console` command in Rails 3: [https://gist.github.com/941174](https://gist.github.com/941174) This is not recommended for code bases with multiple developers, as they may not all want to use Pry.
 
+Also check out the [wiki](https://github.com/pry/pry/wiki/Setting-up-Rails-or-Heroku-to-use-Pry) for other strategies on integrating Pry with rails, notably the [pry-rails](https://github.com/pry/pry/wiki/Setting-up-Rails-or-Heroku-to-use-Pry#wiki-pry_rails) plugin.
+
 ### Limitations:
 
 * Tab completion is currently a bit broken/limited this will have a
@@ -388,10 +391,10 @@ between commands and running commands in background
 
 ### Contact
 
-Problems or questions contact me at [github](http://github.com/banister)
+Problems or questions? file an issue at [github](https://github.com/pry/pry/issues)
 
 ### Contributors
 
-Pry is primarily the work of [John Mair (banisterfiend)]((http://github.com/banister)), for full list
+Pry is primarily the work of [John Mair (banisterfiend)](http://github.com/banister), for full list
 of contributors see the
 [CONTRIBUTORS](https://github.com/pry/pry/blob/master/CONTRIBUTORS) file.

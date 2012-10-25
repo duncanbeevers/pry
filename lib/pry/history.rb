@@ -4,9 +4,13 @@ class Pry
   class History
     attr_accessor :loader, :saver, :pusher, :clearer
 
+    # @return [Fixnum] Number of lines in history when Pry first loaded.
+    attr_reader :original_lines
+
     def initialize
       @history = []
       @saved_lines = 0
+      @original_lines = 0
       restore_default_behavior
     end
 
@@ -25,7 +29,7 @@ class Pry
         @pusher.call(line.chomp)
         @history << line.chomp
       end
-      @saved_lines = @history.length
+      @saved_lines = @original_lines = @history.length
     end
 
     # Write this session's history using `History.saver`.
@@ -58,6 +62,15 @@ class Pry
       @saved_lines = 0
     end
 
+    # @return [Fixnum] The number of lines in history.
+    def history_line_count
+      @history.count
+    end
+
+    def session_line_count
+      @history.count - @original_lines
+    end
+
     # Return an Array containing all stored history.
     # @return [Array<String>] An Array containing all lines of history loaded
     #   or entered by the user in the current session.
@@ -68,13 +81,16 @@ class Pry
     private
     # The default loader. Yields lines from `Pry.history.config.file`.
     def read_from_file
-      history_file = File.expand_path(Pry.config.history.file)
-
       begin
+        history_file = File.expand_path(Pry.config.history.file)
         if File.exists?(history_file)
           File.foreach(history_file) { |line| yield(line) }
         end
-      rescue; end
+      rescue => error
+        unless error.message.empty?
+          warn "History file not loaded, received an error: #{error.message}"
+        end
+      end
     end
 
     # The default saver. Appends the given lines to `Pry.history.config.file`.
@@ -82,10 +98,13 @@ class Pry
     def write_to_file(lines)
       history_file = File.expand_path(Pry.config.history.file)
 
-      if File.writable?(history_file)
+      begin
         File.open(history_file, 'a') do |f|
           lines.each { |ln| f.puts ln }
         end
+      rescue Errno::EACCES
+        # We should probably create an option Pry.show_warnings?!?!?!
+        warn 'Unable to write to your history file, history not saved'
       end
     end
 

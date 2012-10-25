@@ -1,3 +1,105 @@
+14/07/2012 version 0.9.10
+dependency changes:
+* #561 upgrade the slop gem to version 3
+* #590 move to the jist gem from gist.
+* upgrade method_source to 0.8
+
+new features:
+* #572 add --hist, -o and -k flags to gist command
+* #584 support show-source/doc on methods defined in class-eval
+* #585 support show-source/doc on gem methods defined in C
+* #596 add --disable-plugin and --select-plugin options
+* #597 allow "cd -" to switch between bindings
+* #612 add Pry.config.should_load_local_rc to turn off ./.pryrc
+* allow running a file of pry input with pry <file>
+* support colours in "ri" command
+* add before_eval hook
+* prompt now gets a lot more data when proc arity is 1
+
+bug fixes &c.
+* #554 removed the "req" command
+* #567 fix rendering bugs when starting pry
+* #568 fix Array#pretty_print on Jruby
+* #575 fix "edit" on windows
+* #576 fix "find-method" in the presence of badly behaved objects
+* #580 fix "whereami" in erb files on rails
+* #632 raise fewer exceptions while tab completing
+* #605 dont immediately quite pry when an error happens in readline
+* #606 support for ansicon to give jruby windows users colour
+* #613 massive speed improvements to show-source for modules
+* #620 improve whereami command when not in a binding.pry
+* #622 support embedded documents (=begin ... =end)
+* #627 support editing files with spaces in the name
+* changed __binding_impl__ to __pry__
+* support for absolute paths in $EDITOR
+* fix "cat" command on files with unknown extensions
+* many many internal refactorings and tidyings
+
+09/05/2012 version 0.9.9.6 fixes #558
+* #558 has been a thorn in our side for long enough, hopefully this properly fixes it
+(though im not to confident :P)
+
+09/05/2012 version 0.9.9.5 minor bugfix
+* fixed ZeroDivisionError in correct_indentation, bug #558
+* fix double highlighting in rdoc, bug #562
+* autocreate configuration for plugins, bug #548
+
+26/4/2012 version 0.9.9.4 major bugfix
+* fixed `NoMethodError: undefined method `winsize' for #<IO:<STDOUT>>`, bug #549
+* fixes for jruby
+* breakage on `exit` syntax error, fixes, #550
+* heredoc content no longer auto-indented
+
+19/4/2012 version 0.9.9.3 major doc bugfix
+* show-doc would fail on some core classes, i.e `show-doc Bignum`. This is now fixed
+and show allow a wider range of core documentation to be viewed directly in Pry.
+
+18/4/2012 version 0.9.9.2 minor bugfix
+* make correct_indentation's auto-colorization respect Pry.color
+
+18/4/2012 version 0.9.9.1 very minor release
+* cleared up confusion in show-source/show-doc docs that -a switch applies to classes
+as well as modules
+
+18/4/2012 version 0.9.9
+MAJOR NEW FEATURES
+* lines of input are syntax highlighted upon 'enter' keypress
+* show-source command can now show class/module sourcecode (use -a to see all monkeypatches). Hard dependency on ruby18_source_location gem in MRI 1.8
+* show-doc command can show class/module docs (use -a to see docs for all monkeypatches) Hard dependency on ruby18_source_location gem in MRI 1.8.
+* new `find-method` command, performs a recursive search in a namespace for the existence of methods. Can find methods whose names match a regex or methods which contain provided CODE! This command is like a ruby-aware 'grep', very cool (thanks swarley)
+* pry-coolline now works properly with Pry (https://github.com/pry/pry-coolline)
+* alias_command method now much more powerful, e.g: alias_command "lM", "ls -M"
+* `whereami` is now more intelligent, automatically showing entire sourcecode of current method if current context is a method (thanks robgleeson).
+* new `raise-up` command. Allows you to raise an exception that will bubble out of pry (ending the session) and escape into enclosing program.
+
+remaining items:
+* fixed windows crashing bug when paging
+* lines ending with \ are incomplete (kudos to fowl)
+* `edit-method -n` no longer blocks (thanks misfo)s
+* show instance methods of modules by default in ls
+* docs for REPL defined methods can now be displayed using show-doc
+* autoload ruby18_source_location on mri18, when available (https://github.com/conradirwin/ruby18_source_location)
+* tab completion should work on first line now (historic bug fixed)
+* :quiet => true option added to `Pry.start`, turns off whereami
+* another easter egg added
+* show unloaded constants in yellow for ls
+* improved documentation for Pry.config options
+* improved auto indentation
+* JRuby: heuristics used to clean up 'ls' output (less internal methods polluting output)
+
+6/3/2012 version 0.9.8.4 major bugfix
+* ~/.pry_history wasnt being created (if it did not exist)! FIXED
+* `hist --save` saved colors! FIXED
+* added Pry#add_sticky_local API for adding sticky locals to individual pry instances
+
+2/3/2012 version 0.9.8.3 minor update
+* various tweaks to improve rbx support
+* commands now support optional block arguments
+* much improved help command
+* updated method_source dependencya
+* added wtf command
+* jruby should now work in windows (though without color)
+
 9/2/2012 version 0.9.8.2 bugfix
 * fixed bugs related to --super
 * upgraded slop dependency

@@ -14,6 +14,10 @@ class Pry
       # @return [Array] The Procs that process the parsed options.
       attr_accessor :option_processors
 
+      # @return [Array<String>] The input array of strings to process
+      #   as CLI options.
+      attr_accessor :input_args
+
       # Add another set of CLI options (a Slop block)
       def add_options(&block)
         if options
@@ -53,10 +57,18 @@ class Pry
       end
 
       def parse_options(args=ARGV.dup)
-        raise NoOptionsError, "No command line options defined! Use Pry::CLI.add_options to add command line options." if !options
+        unless options
+          raise NoOptionsError, "No command line options defined! Use Pry::CLI.add_options to add command line options."
+        end
 
-        opts = Slop.parse(args, :help => true, :multiple_switches => false, &options)
-        option_processors.each { |processor| processor.call(opts) } if option_processors # option processors are optional
+        self.input_args = args
+
+        opts = Slop.parse!(args, :help => true, :multiple_switches => false, &options)
+
+        # Option processors are optional.
+        if option_processors
+          option_processors.each { |processor| processor.call(opts) }
+        end
 
         self
       end
@@ -66,6 +78,10 @@ class Pry
     reset
   end
 end
+
+
+# String that is built to be executed on start (created by -e and -exec switches)
+exec_string = ""
 
 # Bring in options defined by plugins
 Pry::CLI.add_plugin_options
@@ -78,7 +94,9 @@ See: `https://github.com/pry` for more information.
 Copyright (c) 2011 John Mair (banisterfiend)
 --
 }
-  on :e, :exec, "A line of code to execute in context before the session starts", true
+  on :e, :exec, "A line of code to execute in context before the session starts", :argument => true do |input|
+    exec_string << input + "\n"
+  end
 
   on "no-pager", "Disable pager for long output" do
     Pry.config.pager = false
@@ -92,13 +110,21 @@ Copyright (c) 2011 John Mair (banisterfiend)
     Pry.color = false
   end
 
-  on :f, "Suppress loading of ~/.pryrc" do
-    # load ~/.pryrc, if not suppressed with -f option
+  on :f, "Suppress loading of ~/.pryrc and ./.pryrc" do
     Pry.config.should_load_rc = false
+    Pry.config.should_load_local_rc = false
+  end
+
+  on :s, "select-plugin", "Only load specified plugin (and no others).", :argument => true do |plugin_name|
+    Pry.config.should_load_plugins = false
+    Pry.plugins[plugin_name].activate!
+  end
+
+  on :d, "disable-plugin", "Disable a specific plugin.", :argument => true do |plugin_name|
+    Pry.plugins[plugin_name].disable!
   end
 
   on "no-plugins", "Suppress loading of plugins." do
-    # suppress plugins if given --no-plugins optino
     Pry.config.should_load_plugins = false
   end
 
@@ -115,12 +141,16 @@ Copyright (c) 2011 John Mair (banisterfiend)
     Pry.config.prompt = Pry::SIMPLE_PROMPT
   end
 
-  on :r, :require, "`require` a Ruby script at startup", true do |file|
+  on :r, :require, "`require` a Ruby script at startup", :argument => true do |file|
     Pry.config.requires << file
   end
 
-  on :I, "Add a path to the $LOAD_PATH", true do |path|
-    $LOAD_PATH << path
+  on :I, "Add a path to the $LOAD_PATH", :argument => true, :as => Array, :delimiter => ":" do |load_path|
+    load_path.map! do |path|
+      /\A\.\// =~ path ? path : File.expand_path(path)
+    end
+
+    $LOAD_PATH.unshift(*load_path)
   end
 
   on :v, :version, "Display the Pry version" do
@@ -130,20 +160,23 @@ Copyright (c) 2011 John Mair (banisterfiend)
 
   on(:c, :context,
      "Start the session in the specified context. Equivalent to `context.pry` in a session.",
-     true,
-     :default => "TOPLEVEL_BINDING"
+     :argument => true,
+     :default => "Pry.toplevel_binding"
      )
 end.process_options do |opts|
+
+  exit if opts.help?
+
   # invoked via cli
   Pry.cli = true
 
   # create the actual context
   context = Pry.binding_for(eval(opts[:context]))
 
-  if opts[:exec]
-    exec_string = opts[:exec] + "\n"
-  else
-    exec_string = ""
+  if Pry::CLI.input_args.any? && Pry::CLI.input_args != ["pry"]
+    full_name = File.expand_path(Pry::CLI.input_args.first)
+    Pry.load_file_through_repl(full_name)
+    exit
   end
 
   # Start the session (running any code passed with -e, if there is any)

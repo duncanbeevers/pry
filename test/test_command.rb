@@ -4,6 +4,7 @@ describe "Pry::Command" do
 
   before do
     @set = Pry::CommandSet.new
+    @set.import Pry::Commands
   end
 
   describe 'call_safely' do
@@ -212,7 +213,7 @@ describe "Pry::Command" do
     it 'should provide opts and args as provided by slop' do
       cmd = @set.create_command 'lintilla', "One of 800,000,000 clones" do
          def options(opt)
-           opt.on :f, :four, "A numeric four", :as => Integer, :optional => true
+           opt.on :f, :four, "A numeric four", :as => Integer, :optional_argument => true
          end
 
          def process
@@ -338,6 +339,359 @@ describe "Pry::Command" do
       lambda {
         cmd.new.process_line %(grumpos)
       }.should.raise(Pry::CommandError)
+    end
+   end
+
+  describe "block parameters" do
+    before do
+      @context = Object.new
+      @set.command "walking-spanish", "down the hall", :takes_block => true do
+        inject_var(:@x, command_block.call, target)
+      end
+      @set.import Pry::Commands
+
+      @t = pry_tester(@context, :commands => @set)
+    end
+
+    it 'should accept multiline blocks' do
+      @t.eval <<-EOS
+        walking-spanish | do
+          :jesus
+        end
+      EOS
+
+      @context.instance_variable_get(:@x).should == :jesus
+    end
+
+    it 'should accept normal parameters along with block' do
+      @set.block_command "walking-spanish",
+          "litella's been screeching for a blind pig.",
+          :takes_block => true do |x, y|
+        inject_var(:@x, x, target)
+        inject_var(:@y, y, target)
+        inject_var(:@block_var, command_block.call, target)
+      end
+
+      @t.eval 'walking-spanish john carl| { :jesus }'
+
+      @context.instance_variable_get(:@x).should == "john"
+      @context.instance_variable_get(:@y).should == "carl"
+      @context.instance_variable_get(:@block_var).should == :jesus
+    end
+
+    describe "single line blocks" do
+      it 'should accept blocks with do ; end' do
+        @t.eval 'walking-spanish | do ; :jesus; end'
+        @context.instance_variable_get(:@x).should == :jesus
+      end
+
+      it 'should accept blocks with do; end' do
+        @t.eval 'walking-spanish | do; :jesus; end'
+        @context.instance_variable_get(:@x).should == :jesus
+      end
+
+      it 'should accept blocks with { }' do
+        @t.eval 'walking-spanish | { :jesus }'
+        @context.instance_variable_get(:@x).should == :jesus
+      end
+    end
+
+    describe "block-related content removed from arguments" do
+
+      describe "arg_string" do
+        it 'should remove block-related content from arg_string (with one normal arg)' do
+          @set.block_command "walking-spanish", "down the hall", :takes_block => true do |x, y|
+            inject_var(:@arg_string, arg_string, target)
+            inject_var(:@x, x, target)
+          end
+
+          @t.eval 'walking-spanish john| { :jesus }'
+
+          @context.instance_variable_get(:@arg_string).should == @context.instance_variable_get(:@x)
+        end
+
+        it 'should remove block-related content from arg_string (with no normal args)' do
+          @set.block_command "walking-spanish", "down the hall", :takes_block => true do
+            inject_var(:@arg_string, arg_string, target)
+          end
+
+          @t.eval 'walking-spanish | { :jesus }'
+
+          @context.instance_variable_get(:@arg_string).should == ""
+        end
+
+        it 'should NOT remove block-related content from arg_string when :takes_block => false' do
+          block_string = "| { :jesus }"
+          @set.block_command "walking-spanish", "homemade special", :takes_block => false do
+            inject_var(:@arg_string, arg_string, target)
+          end
+
+          @t.eval "walking-spanish #{block_string}"
+
+          @context.instance_variable_get(:@arg_string).should == block_string
+        end
+      end
+
+      describe "args" do
+        describe "block_command" do
+          it "should remove block-related content from arguments" do
+            @set.block_command "walking-spanish", "glass is full of sand", :takes_block => true do |x, y|
+              inject_var(:@x, x, target)
+              inject_var(:@y, y, target)
+            end
+
+            @t.eval 'walking-spanish | { :jesus }'
+
+            @context.instance_variable_get(:@x).should == nil
+            @context.instance_variable_get(:@y).should == nil
+          end
+
+          it "should NOT remove block-related content from arguments if :takes_block => false" do
+            @set.block_command "walking-spanish", "litella screeching for a blind pig", :takes_block => false do |x, y|
+              inject_var(:@x, x, target)
+              inject_var(:@y, y, target)
+            end
+
+            @t.eval 'walking-spanish | { :jesus }'
+
+            @context.instance_variable_get(:@x).should == "|"
+            @context.instance_variable_get(:@y).should == "{"
+          end
+        end
+
+        describe "create_command" do
+          it "should remove block-related content from arguments" do
+            @set.create_command "walking-spanish", "punk sanders carved one out of wood", :takes_block => true do
+              def process(x, y)
+                inject_var(:@x, x, target)
+                inject_var(:@y, y, target)
+              end
+            end
+
+            @t.eval 'walking-spanish | { :jesus }'
+
+            @context.instance_variable_get(:@x).should == nil
+            @context.instance_variable_get(:@y).should == nil
+          end
+
+          it "should NOT remove block-related content from arguments if :takes_block => false" do
+            @set.create_command "walking-spanish", "down the hall", :takes_block => false do
+              def process(x, y)
+                inject_var(:@x, x, target)
+                inject_var(:@y, y, target)
+              end
+            end
+
+            @t.eval 'walking-spanish | { :jesus }'
+
+            @context.instance_variable_get(:@x).should == "|"
+            @context.instance_variable_get(:@y).should == "{"
+          end
+        end
+      end
+    end
+
+    describe "blocks can take parameters" do
+      describe "{} style blocks" do
+        it 'should accept multiple parameters' do
+          @set.block_command "walking-spanish", "down the hall", :takes_block => true do
+            inject_var(:@x, command_block.call(1, 2), target)
+          end
+
+          @t.eval 'walking-spanish | { |x, y| [x, y] }'
+
+          @context.instance_variable_get(:@x).should == [1, 2]
+        end
+      end
+
+      describe "do/end style blocks" do
+        it 'should accept multiple parameters' do
+          @set.create_command "walking-spanish", "litella", :takes_block => true do
+            def process
+              inject_var(:@x, command_block.call(1, 2), target)
+            end
+          end
+
+          @t.eval <<-EOS
+            walking-spanish | do |x, y|
+              [x, y]
+            end
+          EOS
+
+          @context.instance_variable_get(:@x).should == [1, 2]
+        end
+      end
+    end
+
+    describe "closure behaviour" do
+      it 'should close over locals in the definition context' do
+        @t.eval 'var = :hello', 'walking-spanish | { var }'
+        @context.instance_variable_get(:@x).should == :hello
+      end
+    end
+
+    describe "exposing block parameter" do
+      describe "block_command" do
+        it "should expose block in command_block method" do
+          @set.block_command "walking-spanish", "glass full of sand", :takes_block => true do
+            inject_var(:@x, command_block.call, target)
+          end
+
+          @t.eval 'walking-spanish | { :jesus }'
+
+          @context.instance_variable_get(:@x).should == :jesus
+        end
+      end
+
+      describe "create_command" do
+        it "should NOT expose &block in create_command's process method" do
+          @set.create_command "walking-spanish", "down the hall", :takes_block => true do
+            def process(&block)
+              block.call
+            end
+          end
+          @out = StringIO.new
+
+          proc {
+            @t.eval 'walking-spanish | { :jesus }'
+          }.should.raise(NoMethodError)
+        end
+
+        it "should expose block in command_block method" do
+          @set.create_command "walking-spanish", "homemade special", :takes_block => true do
+            def process
+              inject_var(:@x, command_block.call, target)
+            end
+          end
+
+          @t.eval 'walking-spanish | { :jesus }'
+
+          @context.instance_variable_get(:@x).should == :jesus
+        end
+      end
+    end
+  end
+
+  describe "commands made with custom sub-classes" do
+    before do
+
+      class MyTestCommand < Pry::ClassCommand
+        match /my-*test/
+        description "So just how many sound technicians does it take to change a lightbulb? 1? 2? 3? 1-2-3? Testing?"
+        options :shellwords => false, :listing => "my-test"
+
+        def process
+          output.puts command_name * 2
+        end
+      end
+
+      Pry.commands.add_command MyTestCommand
+    end
+
+    after do
+      Pry.commands.delete 'my-test'
+    end
+
+    it "should allow creating custom sub-classes of Pry::Command" do
+      pry_eval("my---test").should =~ /my-testmy-test/
+    end
+
+    if !mri18_and_no_real_source_location?
+      it "should show the source of the process method" do
+        pry_eval("show-source my-test").should =~ /output.puts command_name/
+      end
+    end
+  end
+
+  describe "commands can save state" do
+    before do
+      @set = Pry::CommandSet.new do
+        create_command "litella", "desc" do
+          def process
+            state.my_state ||= 0
+            state.my_state += 1
+          end
+        end
+
+        create_command "sanders", "desc" do
+          def process
+            state.my_state = "wood"
+          end
+        end
+
+        create_command /[Hh]ello-world/, "desc" do
+          def process
+            state.my_state ||= 0
+            state.my_state += 2
+          end
+        end
+
+      end.import Pry::Commands
+
+      @t = pry_tester(:commands => @set)
+    end
+
+    it 'should save state for the command on the Pry#command_state hash' do
+      @t.eval 'litella'
+      @t.pry.command_state["litella"].my_state.should == 1
+    end
+
+    it 'should ensure state is maintained between multiple invocations of command' do
+      @t.eval 'litella'
+      @t.eval 'litella'
+      @t.pry.command_state["litella"].my_state.should == 2
+    end
+
+    it 'should ensure state with same name stored seperately for each command' do
+      @t.eval 'litella', 'sanders'
+
+      @t.pry.command_state["litella"].my_state.should == 1
+      @t.pry.command_state["sanders"].my_state.should =="wood"
+    end
+
+    it 'should ensure state is properly saved for regex commands' do
+      @t.eval 'hello-world', 'Hello-world'
+      @t.pry.command_state[/[Hh]ello-world/].my_state.should == 4
+    end
+  end
+
+  if defined?(Bond)
+    describe 'complete' do
+      it 'should return the arguments that are defined' do
+        @set.create_command "torrid" do
+          def options(opt)
+            opt.on :test
+            opt.on :lest
+            opt.on :pests
+          end
+        end
+
+        @set.complete('torrid ').should.include('--test')
+      end
+    end
+  end
+
+  describe 'group' do
+    before do
+      @set.import(
+                  Pry::CommandSet.new do
+                    create_command("magic") { group("Not for a public use") }
+                  end
+                 )
+    end
+
+    it 'should be correct for default commands' do
+      @set.commands["help"].group.should == "Help"
+    end
+
+    it 'should not change once it is initialized' do
+      @set.commands["magic"].group("-==CD COMMAND==-")
+      @set.commands["magic"].group.should == "Not for a public use"
+    end
+
+    it 'should not disappear after the call without parameters' do
+      @set.commands["magic"].group
+      @set.commands["magic"].group.should == "Not for a public use"
     end
   end
 end

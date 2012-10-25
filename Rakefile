@@ -12,19 +12,22 @@ def apply_spec_defaults(s)
   s.summary = "An IRB alternative and runtime developer console"
   s.version = Pry::VERSION
   s.date = Time.now.strftime '%Y-%m-%d'
-  s.author = "John Mair (banisterfiend)"
-  s.email = 'jrmair@gmail.com'
+  s.authors = ["John Mair (banisterfiend)", "Conrad Irwin", "Ryan Fitzgerald"]
+  s.email = ['jrmair@gmail.com', 'conrad.irwin@gmail.com', 'rwfitzge@gmail.com']
   s.description = s.summary
   s.homepage = 'http://pry.github.com'
   s.executables = ['pry']
   s.files = `git ls-files`.split("\n")
   s.test_files = `git ls-files -- test/*`.split("\n")
   s.add_dependency('coderay', '~> 1.0.5')
-  s.add_dependency('slop', ['>= 2.4.4', '< 3'])
-  s.add_dependency('method_source','~> 0.7')
+  s.add_dependency('slop', ['~> 3.3.1'])
+  s.add_dependency('method_source','~> 0.8')
   s.add_development_dependency('bacon', '~> 1.1')
   s.add_development_dependency('open4', '~> 1.3')
-  s.add_development_dependency('rake', '~> 0.9')
+  s.add_development_dependency('rake',  '~> 0.9')
+  s.add_development_dependency('guard', '~> 1.3.2')
+  # TODO: make this a plain dependency:
+  s.add_development_dependency('bond', '~> 0.4.2')
 end
 
 def check_dependencies

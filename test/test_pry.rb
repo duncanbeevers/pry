@@ -1,6 +1,9 @@
 require 'helper'
 
 describe Pry do
+  before do
+    @str_output = StringIO.new
+  end
 
   if RUBY_VERSION =~ /1.9/
     describe "Exotic object support" do
@@ -28,6 +31,12 @@ describe Pry do
 
       lambda { Pry.binding_for(o) }.should.not.raise Exception
     end
+
+    it "should not leak local variables" do
+      [Object.new, Array, 3].each do |obj|
+        Pry.binding_for(obj).eval("local_variables").should.be.empty
+      end
+    end
   end
 
   describe "open a Pry session on an object" do
@@ -44,10 +53,9 @@ describe Pry do
       # bug fix for https://github.com/banister/pry/issues/93
       it 'should not leak pry constants into Object namespace' do
         input_string = "Command"
-        str_output = StringIO.new
         o = Object.new
         pry_tester = Pry.new(:input => StringIO.new(input_string),
-                             :output => str_output,
+                             :output => @str_output,
                              :exception_handler => proc { |_, exception, _pry_| @excep = exception },
                              :print => proc {}
                              ).rep(o)
@@ -57,12 +65,11 @@ describe Pry do
 
       if defined?(BasicObject)
         it 'should be able to operate inside the BasicObject class' do
-          $obj = nil
-          redirect_pry_io(InputTester.new(":foo", "$obj = _", "exit-all"), StringIO.new) do
+          redirect_pry_io(InputTester.new(":foo", "Pad.obj = _", "exit-all")) do
             BasicObject.pry
           end
-          $obj.should == :foo
-          $obj = nil
+
+          Pad.obj.should == :foo
         end
       end
 
@@ -76,32 +83,27 @@ describe Pry do
         o.instance_variable_get(:@x).should == 10
       end
 
-      it 'should display error and throw(:breakout) if Pry instance runs out of input' do
-        str_output = StringIO.new
-        catch(:breakout) do
-          redirect_pry_io(StringIO.new(":nothing\n"), str_output) do
-            Pry.new.repl
-          end
+      it 'should display error if Pry instance runs out of input' do
+        redirect_pry_io(StringIO.new, @str_output) do
+          Pry.new.repl
         end
-        str_output.string.should =~ /Error: Pry ran out of things to read/
+        @str_output.string.should =~ /Error: Pry ran out of things to read/
       end
 
       it 'should make self evaluate to the receiver of the rep session' do
         o = :john
-        str_output = StringIO.new
 
-        pry_tester = Pry.new(:input => InputTester.new("self"), :output => str_output)
+        pry_tester = Pry.new(:input => InputTester.new("self"), :output => @str_output)
         pry_tester.rep(o)
-        str_output.string.should =~ /:john/
+        @str_output.string.should =~ /:john/
       end
 
       it 'should work with multi-line input' do
         o = Object.new
-        str_output = StringIO.new
 
-        pry_tester = Pry.new(:input => InputTester.new("x = ", "1 + 4"), :output => str_output)
+        pry_tester = Pry.new(:input => InputTester.new("x = ", "1 + 4"), :output => @str_output)
         pry_tester.rep(o)
-        str_output.string.should =~ /5/
+        @str_output.string.should =~ /5/
       end
 
       it 'should define a nested class under Hello and not on top-level or Pry' do
@@ -112,38 +114,34 @@ describe Pry do
 
       it 'should suppress output if input ends in a ";" and is an Exception object (single line)' do
         o = Object.new
-        str_output = StringIO.new
 
-        pry_tester = Pry.new(:input => InputTester.new("Exception.new;"), :output => str_output)
+        pry_tester = Pry.new(:input => InputTester.new("Exception.new;"), :output => @str_output)
         pry_tester.rep(o)
-        str_output.string.should == ""
+        @str_output.string.should == ""
       end
 
       it 'should suppress output if input ends in a ";" (single line)' do
         o = Object.new
-        str_output = StringIO.new
 
-        pry_tester = Pry.new(:input => InputTester.new("x = 5;"), :output => str_output)
+        pry_tester = Pry.new(:input => InputTester.new("x = 5;"), :output => @str_output)
         pry_tester.rep(o)
-        str_output.string.should == ""
+        @str_output.string.should == ""
       end
 
       it 'should suppress output if input ends in a ";" (multi-line)' do
         o = Object.new
-        str_output = StringIO.new
 
-        pry_tester = Pry.new(:input => InputTester.new("def self.blah", ":test", "end;"), :output => str_output)
+        pry_tester = Pry.new(:input => InputTester.new("def self.blah", ":test", "end;"), :output => @str_output)
         pry_tester.rep(o)
-        str_output.string.should == ""
+        @str_output.string.should == ""
       end
 
       it 'should be able to evaluate exceptions normally' do
         o = Exception.new
-        str_output = StringIO.new
 
         was_called = false
         pry_tester = Pry.new(:input => InputTester.new("self"),
-                             :output => str_output,
+                             :output => @str_output,
                              :exception_handler => proc { was_called = true })
 
         pry_tester.rep(o)
@@ -152,11 +150,10 @@ describe Pry do
 
       it 'should notice when exceptions are raised' do
         o = Exception.new
-        str_output = StringIO.new
 
         was_called = false
         pry_tester = Pry.new(:input => InputTester.new("raise self"),
-                             :output => str_output,
+                             :output => @str_output,
                              :exception_handler => proc { was_called = true })
 
         pry_tester.rep(o)
@@ -188,7 +185,7 @@ describe Pry do
         it "should not mutate the input!" do
           clean = "puts <<-FOO\nhi\nFOO\n"
           a = clean.dup
-          Pry.new.complete_expression?(a)
+          Pry::Code.complete_expression?(a)
           a.should == clean
         end
       end
@@ -256,44 +253,51 @@ describe Pry do
 
       describe "last_result" do
         it "should be set to the most recent value" do
-          mock_pry("2", "_ + 82").should =~ /84/
+          pry_eval("2", "_ + 82").should == 84
         end
 
+        # This test needs mock_pry because the command retvals work by
+        # replacing the eval_string, so _ won't be modified without Pry doing
+        # a REPL loop.
         it "should be set to the result of a command with :keep_retval" do
-          mock_pry("Pry::Commands.block_command '++', '', {:keep_retval => true} do |a| a.to_i + 1; end", '++ 86', '++ #{_}').should =~ /88/
+          Pry::Commands.block_command '++', '', :keep_retval => true do |a|
+            a.to_i + 1
+          end
+
+          mock_pry('++ 86', '++ #{_}').should =~ /88/
         end
 
         it "should be preserved over an empty line" do
-          mock_pry("2 + 2", " ", "\t",  " ", "_ + 92").should =~ /96/
+          pry_eval("2 + 2", " ", "\t",  " ", "_ + 92").should == 96
         end
 
         it "should be preserved when evalling a  command without :keep_retval" do
-          mock_pry("2 + 2", "ls -l", "_ + 96").should =~ /100/
+          pry_eval("2 + 2", "ls -l", "_ + 96").should == 100
         end
       end
 
       describe "test loading rc files" do
-
         before do
+          Pry::HOME_RC_FILE.replace File.expand_path("../testrc", __FILE__)
+          Pry::LOCAL_RC_FILE.replace File.expand_path("../testrc", __FILE__) + "/../testrc"
           Pry.instance_variable_set(:@initial_session, true)
         end
 
         after do
-          Pry::RC_FILES.clear
+          Pry::HOME_RC_FILE.replace "~/.pryrc"
+          Pry::LOCAL_RC_FILE.replace "./.pryrc"
           Pry.config.should_load_rc = false
+          Object.remove_const(:TEST_RC) if defined?(TEST_RC)
         end
 
-        it "should run the rc file only once" do
+        it "should never run the rc file twice" do
           Pry.config.should_load_rc = true
-          2.times { Pry::RC_FILES << File.expand_path("../testrc", __FILE__) }
 
           Pry.start(self, :input => StringIO.new("exit-all\n"), :output => Pry::NullOutput)
           TEST_RC.should == [0]
 
           Pry.start(self, :input => StringIO.new("exit-all\n"), :output => Pry::NullOutput)
           TEST_RC.should == [0]
-
-          Object.remove_const(:TEST_RC)
         end
 
         it "should not load the pryrc if it cannot expand ENV[HOME]" do
@@ -322,8 +326,9 @@ describe Pry do
 
         describe "that raise exceptions" do
           before do
-            Pry::RC_FILES << File.expand_path("../testrcbad", __FILE__)
+            Pry::HOME_RC_FILE = File.expand_path("../testrcbad", __FILE__)
             Pry.config.should_load_rc = true
+            Pry.config.should_load_local_rc = false
 
             putsed = nil
 
@@ -370,13 +375,12 @@ describe Pry do
         it 'should nest properly' do
           Pry.input = InputTester.new("cd 1", "cd 2", "cd 3", "\"nest:\#\{(_pry_.binding_stack.size - 1)\}\"", "exit-all")
 
-          str_output = StringIO.new
-          Pry.output = str_output
+          Pry.output = @str_output
 
           o = Object.new
 
           pry_tester = o.pry
-          str_output.string.should =~ /nest:3/
+          @str_output.string.should =~ /nest:3/
         end
       end
 
@@ -444,8 +448,8 @@ describe Pry do
           str_output.string.should =~ /20/
         end
 
-        it "should error if more than one argument is passed to Object#pry" do
-          lambda { pry(20, :input => Readline) }.should.raise ArgumentError
+        it "should raise if more than two arguments are passed to Object#pry" do
+          lambda { pry(20, :quiet, :input => Readline) }.should.raise ArgumentError
         end
       end
 

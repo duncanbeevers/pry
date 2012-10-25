@@ -1,4 +1,5 @@
 require 'helper'
+require 'set'
 
 describe Pry::Method do
   it "should use String names for compatibility" do
@@ -79,10 +80,6 @@ describe Pry::Method do
       Pry::Method.from_binding(Class.new{ def self.foo; binding; end }.foo).name.should == "foo"
     end
 
-    it 'should NOT find a method from the special pry bindings' do
-      Pry::Method.from_binding(5.__binding__).should == nil
-    end
-
     it 'should NOT find a method from the toplevel binding' do
       Pry::Method.from_binding(TOPLEVEL_BINDING).should == nil
     end
@@ -121,6 +118,17 @@ describe Pry::Method do
       m.owner.should == b
       m.source_line.should == b.line
       m.name.should == "gag"
+    end
+
+    if defined?(BasicObject) && !Pry::Helpers::BaseHelpers.rbx? # rubinius issue 1921
+      it "should find the right method from a BasicObject" do
+        a = Class.new(BasicObject) { def gag; ::Kernel.binding; end; def self.line; __LINE__; end }
+
+        m = Pry::Method.from_binding(a.new.gag)
+        m.owner.should == a
+        m.source_file.should == __FILE__
+        m.source_line.should == a.line
+      end
     end
   end
 
@@ -400,6 +408,49 @@ describe Pry::Method do
       meth.send(:method_name_from_first_line, "def ClassName.x").should == "x"
       meth.send(:method_name_from_first_line, "def obj_name.x").should == "x"
     end
+  end
+
+  describe 'method aliases' do
+    before do
+      @class = Class.new {
+        def eat
+        end
+
+        alias fress eat
+        alias_method :omnomnom, :fress
+
+        def eruct
+        end
+      }
+    end
+
+    it 'should be able to find method aliases' do
+      meth = Pry::Method(@class.new.method(:eat))
+      aliases = Set.new(meth.aliases)
+
+      aliases.should == Set.new(["fress", "omnomnom"])
+    end
+
+    it 'should return an empty Array if cannot find aliases' do
+      meth = Pry::Method(@class.new.method(:eruct))
+      meth.aliases.should.be.empty
+    end
+
+    it 'should not include the own name in the list of aliases' do
+      meth = Pry::Method(@class.new.method(:eat))
+      meth.aliases.should.not.include "eat"
+    end
+
+    unless Pry::Helpers::BaseHelpers.mri_18?
+      # Ruby 1.8 doesn't support this feature.
+      it 'should be able to find aliases for methods implemented in C' do
+        meth = Pry::Method(Hash.new.method(:key?))
+        aliases = Set.new(meth.aliases)
+
+        aliases.should == Set.new(["include?", "member?", "has_key?"])
+      end
+    end
+
   end
 end
 
